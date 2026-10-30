@@ -176,6 +176,17 @@ label.btn{cursor:pointer}
 .modal-card{background:var(--surface);color:var(--ink);border-radius:16px;padding:18px;width:min(560px,100%);max-height:100%;display:flex;flex-direction:column;gap:14px;box-shadow:0 20px 60px rgba(0,0,0,.35)}
 .modal-body{overflow:auto;min-height:120px;border-radius:12px;background:var(--sunk);display:flex;justify-content:center}
 .modal-body img{display:block;max-width:100%;height:auto;object-fit:contain}
+/* pengingat */
+.rem-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.15fr);gap:24px}
+@media (max-width:760px){.rem-grid{grid-template-columns:minmax(0,1fr)}}
+label.opt{display:flex;gap:10px;align-items:flex-start;cursor:pointer}
+label.opt input{width:18px;height:18px;margin-top:2px;flex:none;accent-color:var(--accent)}
+label.opt span{display:flex;flex-direction:column;gap:1px;font-size:14px}
+label.opt small{color:var(--muted);font-size:12.5px}
+label.pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:5px 12px;font-size:13px;font-weight:600;cursor:pointer}
+label.pill input{width:auto;accent-color:var(--accent);margin:0}
+label.pill:has(input:checked){background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+pre.preview{margin:0;white-space:pre-wrap;word-break:break-word;font-family:var(--f-body);font-size:13.5px;line-height:1.5;background:#E7FFDB;color:#111B21;border-radius:12px;padding:12px 14px;max-height:420px;overflow:auto;border:1px solid var(--line)}
 /* laporan */
 .stats.cash{grid-template-columns:repeat(4,minmax(0,1fr))}
 @media (max-width:720px){.stats.cash{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -199,6 +210,7 @@ tr.detail td{background:var(--sunk);white-space:normal;text-align:left;position:
 </head>
 <body>
 <div id="app"></div>
-<script src="app.js?v=4b3d841d"></script>
+<script src="reminder-core.js?v=da13f034"></script>
+<script src="app.js?v=e5c26e4e"></script>
 </body>
 </html>

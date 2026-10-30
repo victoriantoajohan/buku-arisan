@@ -22,6 +22,7 @@ const blank = (o) => {
     startDate:new Date().toISOString().slice(0,10), current:0, members:[], payments:{}, winners:{}, log:[], pay:null }, o || {});
   const pay = d.pay && typeof d.pay === "object" ? d.pay : {};
   d.payouts = d.payouts && typeof d.payouts === "object" ? d.payouts : {};
+  d.reminder = window.ReminderCore ? window.ReminderCore.settings(d) : Object.assign({ enabled:false, days:[3,1], group:true, personal:true, treasurer:true }, d.reminder || {});
   d.pay = { note: String(pay.note || ""), accounts: (Array.isArray(pay.accounts) ? pay.accounts : []).map(a => ({ id: a.id || ("a" + Math.random().toString(36).slice(2,8)), bank: String(a.bank||""), number: String(a.number||""), holder: String(a.holder||"") })) };
   // kompatibel dengan data lama: winners[r] dulu berupa string, sekarang array id
   const w = {};
@@ -455,6 +456,7 @@ function viewSettings(){
     + '<div class="actions"><button data-act="importJson">Impor</button>'
     + '<button class="danger' + (ui.armed.reset?' armed':'') + '" data-act="reset">' + (ui.armed.reset ? 'Hapus semua data?' : 'Hapus semua data') + '</button></div></section>';
   h += viewPaySettings();
+  h += viewReminderSettings();
   if (mode === "remote") {
     h += '<section class="panel"><h2>Ganti PIN bendahara</h2><form id="pinForm" class="form" autocomplete="off">'
       + '<label class="f">PIN lama<input id="p_old" type="password" inputmode="numeric" required></label>'
@@ -624,6 +626,34 @@ function viewPay(r){
   return h + '</div></section>';
 }
 
+const todayWIB = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Jakarta", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+function viewReminderSettings(){
+  const RC = window.ReminderCore;
+  if (!RC) return '';
+  const c = S.reminder, withPhone = S.members.filter(m => String(m.phone || "").replace(/\D/g, "").length >= 9).length;
+  const chk = (id, on, label, desc) => '<label class="opt"><input type="checkbox" id="' + id + '"' + (on ? ' checked' : '') + '><span><b>' + label + '</b>' + (desc ? '<small>' + desc + '</small>' : '') + '</span></label>';
+  const next = RC.nextSend(S, todayWIB());
+  let h = '<section class="panel" id="remSettings" style="grid-column:1/-1"><div class="toolbar"><h2>Pengingat WhatsApp otomatis</h2>'
+    + (c.enabled ? '<span class="chip ok"><i class="dot"></i>Aktif</span>' : '<span class="chip">Nonaktif</span>') + '</div>'
+    + '<p class="muted" style="margin:0">Daftar yang belum transfer dikirim otomatis setiap pagi sesuai jadwal di bawah, pukul ±08.00 WIB. Pengirimannya dijalankan GitHub Actions lewat gateway WhatsApp yang perlu dipasang sekali (lihat <a href="https://github.com/victoriantoajohan/buku-arisan#pengingat-whatsapp-otomatis" target="_blank" rel="noopener">panduan pemasangan</a>).</p>'
+    + '<div class="rem-grid"><div class="stack">'
+    + chk("rem_enabled", c.enabled, "Aktifkan pengingat otomatis", "")
+    + '<div class="eyebrow">Kirim pada</div><div class="seg">' + RC.DAY_OPTIONS.map(d => '<label class="pill"><input type="checkbox" class="remDay" data-d="' + d + '"' + (c.days.includes(d) ? ' checked' : '') + '>' + (d === 0 ? 'Hari-H' : 'H-' + d) + '</label>').join("") + '</div>'
+    + '<div class="eyebrow">Kirim ke</div>'
+    + chk("rem_group", c.group, "Grup WA arisan", "Satu pesan berisi daftar yang belum transfer dan info rekening")
+    + chk("rem_personal", c.personal, "Japri ke yang belum bayar", withPhone + " dari " + S.members.length + " anggota punya nomor WA" + (withPhone < S.members.length ? " (isi lewat tombol Ubah di daftar anggota)" : ""))
+    + chk("rem_treasurer", c.treasurer, "Rekap ke bendahara", "Status pembayaran dan hasil pengiriman")
+    + '<p class="muted" style="margin:0;font-size:13.5px">' + (next ? 'Kiriman berikutnya: <b>' + esc(next.dateText) + '</b> (' + next.label + ' kocokan putaran ' + (next.round + 1) + ')' : (c.enabled ? 'Tidak ada jadwal kirim yang tersisa.' : 'Aktifkan untuk melihat jadwal kiriman berikutnya.')) + '</p>'
+    + '</div><div class="stack"><div class="toolbar"><div class="eyebrow">Pratinjau pesan</div><div class="seg">'
+    + [["group","Grup"],["personal","Japri"],["treasurer","Bendahara"]].map(([k,l]) => '<button data-act="remPrev" data-v="' + k + '" aria-pressed="' + ((ui.remPrev || "group") === k) + '">' + l + '</button>').join("") + '</div></div>';
+  const plan = RC.build(Object.assign({}, S, { reminder: Object.assign({}, c, { enabled: true, group: true, personal: true, treasurer: true }) }), { today: todayWIB(), url: mode === "remote" ? shareUrl() : "", hasQr: !!qrData, force: true });
+  const k = ui.remPrev || "group";
+  const text = k === "group" ? plan.group : k === "treasurer" ? plan.treasurer : (plan.personal[0] ? plan.personal[0].message : null);
+  h += '<pre class="preview" id="remPreview">' + esc(text || (k === "personal" ? "Tidak ada anggota belum bayar yang punya nomor WA." : "")) + '</pre>'
+    + (k === "personal" && plan.personal.length > 1 ? '<p class="muted" style="margin:0;font-size:13px">Contoh untuk ' + esc(plan.personal[0].name) + '; ' + (plan.personal.length - 1) + ' anggota lain menerima pesan serupa.</p>' : '')
+    + '</div></div></section>';
+  return h;
+}
 function viewPaySettings(){
   let h = '<section class="panel" id="paySettings" style="grid-column:1/-1"><h2>Info pembayaran</h2>'
     + '<p class="muted" style="margin:0">Ditampilkan ke semua anggota di halaman utama dan disertakan di pengingat WhatsApp.</p>'
@@ -837,6 +867,7 @@ app.addEventListener("click", e => {
     case "setCurrent": if (!mustEdit()) return; S.current = ui.round; commit("Putaran berjalan diubah ke " + (S.current+1)); break;
     case "remind": copy(reminderText(ui.round), "Pengingat tersalin, tempel di grup WA"); break;
     case "summary": copy(summaryText(ui.round), "Rekap tersalin"); break;
+    case "remPrev": ui.remPrev = b.dataset.v; render(); break;
     case "repSort": ui.repSort = b.dataset.v; render(); break;
     case "repOpen": ui.repOpen = ui.repOpen === id ? null : id; render(); break;
     case "repCsv": download(slug() + "-laporan-anggota.csv", reportCsv(), "text/csv;charset=utf-8"); break;
@@ -946,6 +977,20 @@ app.addEventListener("change", e => {
     a[t.dataset.k] = t.value.trim();
     commit(a.number ? "Info rekening " + (a.bank || "") + " diperbarui" : null);
     return;
+  }
+  if (t.id === "rem_enabled" || t.id === "rem_group" || t.id === "rem_personal" || t.id === "rem_treasurer") {
+    if (!mustEdit()) return;
+    const key = t.id.slice(4);
+    S.reminder[key] = t.checked;
+    const label = { enabled: "Pengingat otomatis", group: "Pengingat ke grup", personal: "Pengingat japri", treasurer: "Rekap ke bendahara" }[key];
+    commit(label + (t.checked ? " diaktifkan" : " dimatikan")); return;
+  }
+  if (t.classList.contains("remDay")) {
+    if (!mustEdit()) return;
+    const d = +t.dataset.d, set = new Set(S.reminder.days);
+    t.checked ? set.add(d) : set.delete(d);
+    S.reminder.days = [...set].sort((a, b) => b - a);
+    commit("Jadwal pengingat: " + (S.reminder.days.map(x => x === 0 ? "hari-H" : "H-" + x).join(", ") || "tidak ada")); return;
   }
   if (t.id === "pay_note") { if (!mustEdit()) return; S.pay.note = t.value.trim(); commit("Catatan pembayaran diperbarui"); return; }
   if (t.id === "manualWin" && t.value) { if (!mustEdit()) return; addWinners(ui.round, [t.value]); return; }

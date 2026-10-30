@@ -76,6 +76,75 @@ Gambar QR disimpan di kolom terpisah (`pay_qr`) dan hanya diunduh ulang bila ber
 
 Di panel **Kocokan**, setiap pemenang punya tombol **Tandai sudah ditransfer** dan **Upload bukti** (khusus bendahara). Mengunggah bukti otomatis menandai pemenang itu sudah ditransfer. Semua anggota melihat status "Sudah ditransfer" dan tombol **Lihat bukti** untuk membuka gambarnya; riwayatnya juga tampil di tab Riwayat. Gambar bukti disimpan di tabel `arisan_proof` (migrasi `003_payout_proof.sql`).
 
+## Pengingat WhatsApp otomatis
+
+```
+GitHub Actions (setiap hari 08:07 WIB)
+   └─ scripts/send-reminder.mjs ── baca data arisan (Supabase)
+        ├─ bukan jadwal H-n / nonaktif → selesai
+        └─ jadwal → kirim lewat WAHA: grup · japri yang belum bayar · rekap bendahara
+```
+
+Jadwal (H-7, H-3, H-2, H-1, hari-H) dan tujuan kiriman diatur di aplikasi: **Pengaturan → Pengingat WhatsApp otomatis**, lengkap dengan pratinjau pesannya. Pemasangan berikut cukup dilakukan sekali.
+
+### 1. Pasang WAHA Core (gratis, open source)
+
+[WAHA](https://waha.devlike.pro/) Core berlisensi MIT dan gratis, mendukung satu nomor WhatsApp. Jalankan di mesin yang **selalu menyala**: PC/mini-PC/Raspberry Pi di rumah, VPS, atau VM gratis (misalnya Oracle Cloud Always Free).
+
+```yaml
+# docker-compose.yml
+services:
+  waha:
+    image: devlikeapro/waha:latest
+    restart: unless-stopped
+    ports: ["3000:3000"]
+    environment:
+      WHATSAPP_API_KEY: ganti-dengan-kunci-acak-panjang
+      WHATSAPP_DEFAULT_ENGINE: NOWEB          # ringan, tanpa browser
+      WAHA_DASHBOARD_ENABLED: "true"
+      WAHA_DASHBOARD_USERNAME: admin
+      WAHA_DASHBOARD_PASSWORD: ganti-password-dashboard
+    volumes: ["./waha-sessions:/app/.sessions"]
+```
+
+`docker compose up -d`, buka `http://IP-MESIN:3000/dashboard`, mulai sesi **default**, lalu scan QR dari WhatsApp → *Perangkat tertaut*.
+
+> **Pakai nomor WhatsApp cadangan, jangan nomor utama.** WAHA (dan gateway tidak resmi lain seperti Fonnte) memakai WhatsApp Web; WhatsApp bisa memblokir nomor yang dianggap mengirim spam. Volume pengingat arisan kecil dan skrip memberi jeda acak antar japri, tapi risikonya tetap ada.
+
+Masukkan nomor cadangan itu ke grup arisan. ID grup (berakhiran `@g.us`) bisa dilihat di dashboard WAHA atau lewat endpoint daftar grup di halaman Swagger `http://IP-MESIN:3000/`.
+
+### 2. Buat WAHA bisa dijangkau GitHub Actions
+
+GitHub Actions berjalan di internet, jadi WAHA perlu alamat publik ber-HTTPS. Cara gratis: **Cloudflare Tunnel** bernama (named tunnel) yang mengarah ke `http://localhost:3000`, misalnya `https://wa.domainmu.com`. Kunci `WHATSAPP_API_KEY` wajib diisi karena alamat ini publik.
+
+*Alternatif tanpa membuka akses dari internet:* jalankan skrip langsung di mesin yang sama dengan cron:
+```
+7 8 * * *  cd /opt/buku-arisan && ARISAN_ID=... WAHA_URL=http://localhost:3000 WAHA_API_KEY=... WA_GROUP_ID=... TREASURER_PHONE=... node scripts/send-reminder.mjs
+```
+
+### 3. Isi secret di GitHub
+
+Repo → **Settings → Secrets and variables → Actions → New repository secret**:
+
+| Secret | Isi |
+|---|---|
+| `ARISAN_ID` | ID arisan (bagian `?g=...` di link) |
+| `WAHA_URL` | alamat WAHA, mis. `https://wa.domainmu.com` |
+| `WAHA_API_KEY` | nilai `WHATSAPP_API_KEY` |
+| `WA_GROUP_ID` | ID grup, mis. `120363...@g.us` |
+| `TREASURER_PHONE` | nomor bendahara untuk rekap, mis. `62812...` |
+| `ARISAN_PIN` | *(opsional)* PIN bendahara, supaya pengiriman tercatat di Catatan aktivitas |
+
+Provider lain: buat **variable** `WA_PROVIDER` = `fonnte` (secret `FONNTE_TOKEN`) atau `webhook` (secret `WA_WEBHOOK_URL`, opsional `WA_WEBHOOK_TOKEN`; menerima POST JSON `{to, kind, message}`, `kind` = `group`/`personal`).
+
+### 4. Aktifkan dan uji
+
+1. Aplikasi → **Pengaturan → Pengingat WhatsApp otomatis** → centang *Aktifkan*, pilih jadwal dan tujuan.
+2. GitHub → **Actions → Pengingat WhatsApp → Run workflow** dengan *Uji coba* tercentang untuk memastikan semua secret terbaca.
+3. Ulangi dengan *Uji coba* dimatikan dan *Kirim walau bukan jadwal* dicentang untuk mengirim sungguhan sekali.
+
+Log Actions di repo publik bisa dilihat siapa saja, jadi skrip tidak mencetak isi pesan, nama lengkap, atau nomor telepon utuh. Bila ada kiriman yang gagal, workflow ditandai gagal dan GitHub mengirim email.
+
 ## Laporan
 
 Tab **Laporan** (terlihat semua anggota) berisi ringkasan kas (iuran masuk, sudah ditransfer ke pemenang, saldo di bendahara, tunggakan) dan tabel per anggota: total setor, tunggakan, sisa kewajiban, giliran, dan uang yang sudah diterima. Klik nama untuk rincian per putaran dan **Salin laporan** pribadi untuk dikirim lewat WhatsApp. Tersedia juga ekspor CSV.

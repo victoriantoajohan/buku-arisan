@@ -1,0 +1,49 @@
+# Pengingat iuran arisan lewat WhatsApp.
+# Berjalan setiap hari pukul 08:07 WIB; skrip sendiri yang memutuskan apakah hari ini
+# termasuk jadwal (H-7/H-3/H-2/H-1/hari-H) sesuai Pengaturan di aplikasi.
+# Pengaturan secret: lihat README bagian "Pengingat WhatsApp otomatis".
+name: Pengingat WhatsApp
+
+on:
+  schedule:
+    - cron: "7 1 * * *"   # 01:07 UTC = 08:07 WIB
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Uji coba saja (tidak mengirim pesan)"
+        type: boolean
+        default: true
+      force:
+        description: "Kirim walau hari ini bukan jadwal H-n"
+        type: boolean
+        default: false
+
+concurrency:
+  group: wa-reminder
+  cancel-in-progress: false
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Kirim pengingat
+        run: node scripts/send-reminder.mjs
+        env:
+          ARISAN_ID: ${{ secrets.ARISAN_ID }}
+          WA_PROVIDER: ${{ vars.WA_PROVIDER || 'waha' }}
+          WAHA_URL: ${{ secrets.WAHA_URL }}
+          WAHA_API_KEY: ${{ secrets.WAHA_API_KEY }}
+          WAHA_SESSION: ${{ vars.WAHA_SESSION || 'default' }}
+          FONNTE_TOKEN: ${{ secrets.FONNTE_TOKEN }}
+          WA_WEBHOOK_URL: ${{ secrets.WA_WEBHOOK_URL }}
+          WA_WEBHOOK_TOKEN: ${{ secrets.WA_WEBHOOK_TOKEN }}
+          WA_GROUP_ID: ${{ secrets.WA_GROUP_ID }}
+          TREASURER_PHONE: ${{ secrets.TREASURER_PHONE }}
+          ARISAN_PIN: ${{ secrets.ARISAN_PIN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run && '1' || '' }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force && '1' || '' }}
