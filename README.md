@@ -72,6 +72,10 @@ Bendahara mengisinya di **Pengaturan → Info pembayaran**: nama bank atau e-wal
 
 Gambar QR disimpan di kolom terpisah (`pay_qr`) dan hanya diunduh ulang bila berubah. Untuk project yang dibuat sebelum fitur ini ada, jalankan `supabase/migrations/002_payment_qr.sql` sekali di SQL Editor. `schema.sql` sudah mencakupnya untuk instalasi baru.
 
+## Transfer ke pemenang & bukti transfer
+
+Di panel **Kocokan**, setiap pemenang punya tombol **Tandai sudah ditransfer** dan **Upload bukti** (khusus bendahara). Mengunggah bukti otomatis menandai pemenang itu sudah ditransfer. Semua anggota melihat status "Sudah ditransfer" dan tombol **Lihat bukti** untuk membuka gambarnya; riwayatnya juga tampil di tab Riwayat. Gambar bukti disimpan di tabel `arisan_proof` (migrasi `003_payout_proof.sql`).
+
 ## Catatan
 
 - **Realtime**: broadcast publik aktif secara default. Kalau di *Realtime → Settings* kamu mengaktifkan "private channels only", matikan opsi itu. Tanpa realtime pun data tetap tersinkron lewat polling setiap 20 detik.

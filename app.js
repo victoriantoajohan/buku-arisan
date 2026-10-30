@@ -21,6 +21,7 @@ const blank = (o) => {
   const d = Object.assign({ v:1, sample:false, name:"Arisan", defaultAmount:200000, cycle:"bulanan", winnersPerRound:1,
     startDate:new Date().toISOString().slice(0,10), current:0, members:[], payments:{}, winners:{}, log:[], pay:null }, o || {});
   const pay = d.pay && typeof d.pay === "object" ? d.pay : {};
+  d.payouts = d.payouts && typeof d.payouts === "object" ? d.payouts : {};
   d.pay = { note: String(pay.note || ""), accounts: (Array.isArray(pay.accounts) ? pay.accounts : []).map(a => ({ id: a.id || ("a" + Math.random().toString(36).slice(2,8)), bank: String(a.bank||""), number: String(a.number||""), holder: String(a.holder||"") })) };
   // kompatibel dengan data lama: winners[r] dulu berupa string, sekarang array id
   const w = {};
@@ -44,6 +45,8 @@ let channel = null;
 let loadError = "";
 let qrData = null, qrHash = null;   // gambar QR disimpan terpisah dari data utama
 const DEMO_QR_KEY = "buku-arisan-demo-qr";
+const proofCache = {};               // hash -> data URL
+const demoProofKey = (r, id) => "buku-arisan-demo-proof-" + r + "-" + id;
 const BANKS = ["BCA","BRI","BNI","Mandiri","BSI","CIMB Niaga","Permata","Danamon","BTN","OCBC","Bank Jago","SeaBank","blu by BCA Digital","Jenius","DANA","OVO","GoPay","ShopeePay","LinkAja"];
 
 const ui = { rollCount: 1, round: 0, tab: "anggota", filter: "semua", q: "", editing: null, armed: {}, rolling: false, rollName: "", login: false, loginErr: "", createErr: "", busy: false };
@@ -84,6 +87,7 @@ const readOnly = () => !isAdmin;
 const shareUrl = () => location.origin + location.pathname + "?g=" + GID;
 const icon = { check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>' };
 const ERR = {
+  invalid_input: "Data tidak valid.", too_many: "Batas jumlah bukti transfer tercapai.",
   invalid_image: "File harus berupa gambar PNG, JPG, atau WebP.",
   invalid_pin: "PIN salah.", locked: "Terlalu banyak percobaan salah. Coba lagi 15 menit lagi.",
   not_found: "Arisan tidak ditemukan.", pin_too_short: "PIN minimal 4 karakter.",
@@ -326,24 +330,14 @@ function viewApp(){
     html += '<div class="drum"><span class="eyebrow">Mengocok ' + ui.rollCount + ' pemenang…</span><div class="slip rolling" id="rollName">' + esc(ui.rollName) + '</div></div>';
   } else if (ws.length) {
     html += '<div class="drum won"><span class="eyebrow">Penerima putaran ' + (r+1) + (slots(r) > 1 ? ' · ' + ws.length + ' dari ' + slots(r) : '') + '</span>'
-      + '<div class="slip">' + ws.map(m => esc(m.name)).join('<br>') + '</div><div class="amt">' + rp(payout(r)) + (slots(r) > 1 ? ' per orang' : '') + '</div>' + fundChip + '</div>';
+      + '<div class="slip">' + ws.map(m => esc(m.name)).join('<br>') + '</div><div class="amt">' + rp(payout(r)) + (slots(r) > 1 ? ' per orang' : '') + '</div>'
+      + (ws.every(m => payoutOf(r, m.id)) ? '<span class="chip ok">Sudah ditransfer bendahara</span>' : fundChip) + '</div>';
   } else {
     html += '<div class="drum"><span class="eyebrow">Putaran ' + (r+1) + ' · ' + slots(r) + ' pemenang</span><div class="slip">' + (notYet.length ? '?' : (N ? 'Semua sudah dapat' : 'Belum ada anggota')) + '</div>'
       + '<div class="muted" style="font-size:13px">' + (notYet.length ? 'Diundi dari ' + notYet.length + ' anggota yang belum pernah dapat' + (slots(r) > 1 ? ', masing-masing dapat ' + rp(payout(r)) : '') : (N ? 'Arisan sudah selesai satu siklus' : 'Tambahkan anggota dulu')) + '</div></div>';
   }
+  if (ws.length && !ui.rolling) html += winnerRows(r, ws, notYet, RO);
   if (!RO && !ui.rolling) {
-    if (ws.length) {
-      html += '<div class="list">' + ws.map((m, i) => {
-        const others = [];
-        for (const k in S.winners) if (+k !== r) (S.winners[k] || []).forEach(id => { const o = S.members.find(x => x.id === id); if (o) others.push([o, +k]); });
-        others.sort((a, b) => a[1] - b[1]);
-        return '<div class="row" style="grid-template-columns:1fr auto"><div class="who"><div class="name">' + esc(m.name) + '</div><div class="sub">' + rp(payout(r)) + '</div></div>'
-          + '<div class="ops"><select class="repSel" data-id="' + esc(m.id) + '" aria-label="Ganti ' + esc(m.name) + '" style="width:auto;max-width:190px"><option value="">Ganti…</option>'
-          + (notYet.length ? '<optgroup label="Ganti dengan yang belum dapat">' + notYet.map(n => '<option value="n:' + esc(n.id) + '">' + esc(n.name) + '</option>').join("") + '</optgroup>' : '')
-          + (others.length ? '<optgroup label="Tukar giliran dengan">' + others.map(([o, k]) => '<option value="s:' + esc(o.id) + ':' + k + '">' + esc(o.name) + ' (P' + (k+1) + ')</option>').join("") + '</optgroup>' : '')
-          + '</select><button class="ghost danger' + (ui.armed["rm"+m.id]?' armed':'') + '" data-act="rmWin" data-id="' + esc(m.id) + '">' + (ui.armed["rm"+m.id] ? 'Hapus?' : 'Hapus') + '</button></div></div>';
-      }).join("") + '</div>';
-    }
     if (need > 0 && notYet.length) {
       const unpaid = N - paidN, n = Math.min(need, notYet.length);
       html += '<div class="actions"><button class="gold" data-act="roll">' + (ui.armed.roll ? unpaid + ' belum transfer, tetap kocok?' : (ws.length ? 'Kocok ' + n + ' pemenang lagi' : 'Kocok ' + (n > 1 ? n + ' pemenang' : 'pemenang'))) + '</button>'
@@ -436,7 +430,8 @@ function viewHistory(){
   h += '</section><section class="panel"><h2>Penerima per putaran</h2><div class="list">';
   for (let i=0;i<R;i++){
     const w = winnersOf(i);
-    h += '<div class="row" style="grid-template-columns:auto 1fr auto"><span class="chip ' + (w.length?'gold':'') + '">P' + (i+1) + '</span><div class="who"><div class="name">' + (w.length ? esc(names(w)) : '<span class="muted">Belum dikocok</span>') + (w.length && w.length < slots(i) ? ' <span class="chip warn">' + (slots(i) - w.length) + ' slot kosong</span>' : '') + '</div><div class="sub">' + fDate(roundDate(i)) + '</div></div><div class="amt">' + rp(payout(i)) + (slots(i) > 1 ? '<div class="muted" style="font-size:12px">per orang</div>' : '') + '</div></div>';
+    h += '<div class="row" style="grid-template-columns:auto 1fr auto"><span class="chip ' + (w.length?'gold':'') + '">P' + (i+1) + '</span><div class="who"><div class="name">' + (w.length ? esc(names(w)) : '<span class="muted">Belum dikocok</span>') + (w.length && w.length < slots(i) ? ' <span class="chip warn">' + (slots(i) - w.length) + ' slot kosong</span>' : '') + '</div><div class="sub">' + fDate(roundDate(i))
+      + w.map(m => { const po = payoutOf(i, m.id); return po ? '<span class="chip ok">' + esc(m.name.split(" ")[0]) + ' ✓ ditransfer</span>' + (po.proof ? '<button class="btn-mini" data-act="viewProof" data-r="' + i + '" data-id="' + esc(m.id) + '">Bukti</button>' : '') : ''; }).join("") + '</div></div><div class="amt">' + rp(payout(i)) + (slots(i) > 1 ? '<div class="muted" style="font-size:12px">per orang</div>' : '') + '</div></div>';
   }
   h += '</div></section><section class="panel"><h2>Catatan aktivitas</h2><div class="log">'
     + (S.log.length ? S.log.map(l => '<div><time>' + new Date(l.t).toLocaleString("id-ID",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"}) + '</time><span>' + esc(l.m) + '</span></div>').join("") : '<span class="muted">Belum ada aktivitas.</span>')
@@ -469,7 +464,8 @@ function viewSettings(){
 }
 
 /* ---------- QR pembayaran ---------- */
-function fileToQrDataUrl(file){
+function fileToQrDataUrl(file){ return fileToDataUrl(file); }
+function fileToDataUrl(file){
   return new Promise((resolve, reject) => {
     if (!file || !/^image\//.test(file.type)) return reject(new Error(ERR.invalid_image));
     if (file.size > 15 * 1024 * 1024) return reject(new Error("Gambar terlalu besar (maks 15 MB)."));
@@ -522,6 +518,84 @@ function payLines(){
   return "\n\n*Transfer ke:*\n" + acc.map(a => "• " + (a.bank || "Rekening") + " " + a.number + (a.holder ? " a.n. " + a.holder : "")).join("\n")
     + (qrData ? (acc.length ? "\n" : "") + "• QRIS: scan di " + (mode === "remote" ? shareUrl() : "aplikasi arisan") : "")
     + (S.pay.note ? "\n" + S.pay.note : "");
+}
+
+/* ---------- transfer ke pemenang ---------- */
+const payoutOf = (r, id) => (S.payouts[r] || {})[id] || null;
+function payoutChip(r, id){
+  const po = payoutOf(r, id);
+  return po ? '<span class="chip ok">Sudah ditransfer ' + fShort(po.t) + '</span>' : '<span class="chip">Belum ditransfer</span>';
+}
+function proofSet(r, id, hash){ const po = (S.payouts[r] = S.payouts[r] || {}); po[id] = { t: (po[id] && po[id].t) || new Date().toISOString(), proof: hash || null }; }
+async function saveProof(r, id, dataUrl){
+  if (!mustEdit()) return;
+  ui.proofBusy = r + ":" + id; render();
+  try {
+    let hash = null;
+    if (mode === "demo") {
+      if (dataUrl) { lsSet(demoProofKey(r, id), dataUrl); hash = "d" + dataUrl.length.toString(36) + dataUrl.slice(-6).replace(/\W/g, ""); }
+      else lsSet(demoProofKey(r, id), null);
+    } else {
+      const res = await rpc("set_payout_proof", { p_id: GID, p_pin: pin, p_round: r, p_member: id, p_img: dataUrl || "" });
+      if (!res || !res.ok) {
+        const code = res && res.error;
+        if (code === "invalid_pin" || code === "locked") logout();
+        throw new Error(ERR[code] || "Gagal menyimpan bukti transfer.");
+      }
+      hash = res.hash || null;
+    }
+    if (hash) proofCache[hash] = dataUrl;
+    ui.proofBusy = null;
+    if (dataUrl) { proofSet(r, id, hash); commit("Bukti transfer untuk " + memberName(id) + " diunggah (Putaran " + (r+1) + ")"); toast("Bukti transfer tersimpan"); }
+    else { const po = payoutOf(r, id); if (po) po.proof = null; commit("Bukti transfer untuk " + memberName(id) + " dihapus (Putaran " + (r+1) + ")"); toast("Bukti transfer dihapus"); }
+  } catch(e) { ui.proofBusy = null; render(); toast(e.message || "Gagal menyimpan bukti transfer."); }
+}
+async function openProof(r, id){
+  const po = payoutOf(r, id); if (!po || !po.proof) return;
+  ui.modal = { r, id, img: proofCache[po.proof] || null, err: "" }; renderModal();
+  if (ui.modal.img) return;
+  try {
+    const img = mode === "demo" ? lsGet(demoProofKey(r, id)) : await rpc("get_payout_proof", { p_id: GID, p_round: r, p_member: id });
+    if (!ui.modal || ui.modal.id !== id) return;
+    if (img) { proofCache[po.proof] = img; ui.modal.img = img; } else ui.modal.err = "Bukti transfer tidak ditemukan.";
+  } catch(e) { if (ui.modal) ui.modal.err = "Gagal memuat bukti transfer."; }
+  renderModal();
+}
+function renderModal(){
+  let el = document.getElementById("modal");
+  if (!ui.modal) { if (el) el.remove(); document.body.style.overflow = ""; return; }
+  if (!el) { el = document.createElement("div"); el.id = "modal"; el.className = "modal"; el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true"); document.body.appendChild(el); document.body.style.overflow = "hidden"; }
+  const { r, id, img, err } = ui.modal, po = payoutOf(r, id) || {};
+  el.innerHTML = '<div class="modal-card"><div class="toolbar"><div><div class="eyebrow">Bukti transfer · Putaran ' + (r+1) + '</div><h2>' + esc(memberName(id)) + '</h2>'
+    + '<div class="muted" style="font-size:13.5px">' + rp(payout(r)) + (po.t ? ' · ditransfer ' + fDate(new Date(po.t), {day:"numeric", month:"long", year:"numeric"}) : '') + '</div></div>'
+    + '<button class="ghost" data-act="closeModal" aria-label="Tutup">Tutup ✕</button></div>'
+    + '<div class="modal-body">' + (img ? '<img src="' + esc(img) + '" alt="Bukti transfer ke ' + esc(memberName(id)) + '">' : '<div class="empty">' + esc(err || "Memuat bukti…") + '</div>') + '</div>'
+    + (img ? '<div class="actions"><button data-act="dlProof">Unduh bukti</button></div>' : '') + '</div>';
+  const btn = el.querySelector('[data-act="closeModal"]'); if (btn) btn.focus();
+}
+function winnerRows(r, ws, notYet, RO){
+  return '<div class="list">' + ws.map(m => {
+    const po = payoutOf(r, m.id), busy = ui.proofBusy === r + ":" + m.id;
+    let h = '<div class="winrow"><div class="who"><div class="name">' + esc(m.name) + ' <span class="muted num" style="font-weight:500;font-size:13px">' + rp(payout(r)) + '</span></div>'
+      + '<div class="sub">' + payoutChip(r, m.id) + (po && po.proof ? '<button class="btn-mini" data-act="viewProof" data-r="' + r + '" data-id="' + esc(m.id) + '">Lihat bukti</button>' : (po ? '<span class="muted">tanpa bukti</span>' : '')) + '</div></div>';
+    if (!RO) {
+      const others = [];
+      for (const k in S.winners) if (+k !== r) (S.winners[k] || []).forEach(id => { const o = S.members.find(x => x.id === id); if (o) others.push([o, +k]); });
+      others.sort((a, b) => a[1] - b[1]);
+      const fid = "proof_" + r + "_" + m.id;
+      h += '<div class="ops">'
+        + (po ? '<button class="ghost' + (ui.armed["po"+m.id]?' danger armed':'') + '" data-act="unpayout" data-id="' + esc(m.id) + '">' + (ui.armed["po"+m.id] ? 'Batalkan tanda?' : 'Batalkan tanda') + '</button>'
+              : '<button class="primary" data-act="payout" data-id="' + esc(m.id) + '">Tandai sudah ditransfer</button>')
+        + '<label class="btn" for="' + esc(fid) + '">' + (busy ? 'Mengunggah…' : (po && po.proof ? 'Ganti bukti' : 'Upload bukti')) + '</label>'
+        + '<input type="file" id="' + esc(fid) + '" class="proofFile" data-r="' + r + '" data-id="' + esc(m.id) + '" accept="image/png,image/jpeg,image/webp" hidden' + (busy ? ' disabled' : '') + '>'
+        + (po && po.proof ? '<button class="ghost danger' + (ui.armed["pf"+m.id]?' armed':'') + '" data-act="delProof" data-id="' + esc(m.id) + '">' + (ui.armed["pf"+m.id] ? 'Hapus bukti?' : 'Hapus bukti') + '</button>' : '')
+        + '<select class="repSel" data-id="' + esc(m.id) + '" aria-label="Ganti ' + esc(m.name) + '" style="width:auto;max-width:170px"><option value="">Ganti pemenang…</option>'
+        + (notYet.length ? '<optgroup label="Ganti dengan yang belum dapat">' + notYet.map(n => '<option value="n:' + esc(n.id) + '">' + esc(n.name) + '</option>').join("") + '</optgroup>' : '')
+        + (others.length ? '<optgroup label="Tukar giliran dengan">' + others.map(([o, k]) => '<option value="s:' + esc(o.id) + ':' + k + '">' + esc(o.name) + ' (P' + (k+1) + ')</option>').join("") + '</optgroup>' : '')
+        + '</select><button class="ghost danger' + (ui.armed["rm"+m.id]?' armed':'') + '" data-act="rmWin" data-id="' + esc(m.id) + '">' + (ui.armed["rm"+m.id] ? 'Hapus?' : 'Hapus pemenang') + '</button></div>';
+    }
+    return h + '</div>';
+  }).join("") + '</div>';
 }
 
 function viewPay(r){
@@ -608,7 +682,7 @@ function summaryText(r){
   return "*Rekap " + (S.name||"Arisan") + " — Putaran " + (r+1) + "*\n"
     + S.members.map(m => (isPaid(r, m.id) ? "✅ " : "⬜ ") + m.name + " — " + rp(m.amount)).join("\n")
     + "\n\nTerkumpul: " + rp(collected(r)) + " dari " + rp(pot())
-    + (w.length ? "\nPenerima: " + names(w) + " (" + rp(payout(r)) + (w.length > 1 ? " per orang" : "") + ")" : "\nPenerima: belum dikocok")
+    + (w.length ? "\nPenerima (" + rp(payout(r)) + (w.length > 1 ? " per orang" : "") + "):\n" + w.map(m => (payoutOf(r, m.id) ? "✅ " : "⏳ ") + m.name + (payoutOf(r, m.id) ? " — sudah ditransfer" + (payoutOf(r, m.id).proof ? ", bukti di link" : "") : " — belum ditransfer")).join("\n") : "\nPenerima: belum dikocok")
     + (mode === "remote" ? "\n\n" + shareUrl() : "");
 }
 function csvText(){
@@ -630,6 +704,16 @@ app.addEventListener("click", e => {
     case "dlQr": if (qrData) downloadUrl("qris-" + slug() + (qrData.startsWith("data:image/png") ? ".png" : ".jpg"), qrData); break;
     case "addAcc": if (!mustEdit()) return; S.pay.accounts.push({ id: "a" + Date.now().toString(36), bank: "", number: "", holder: "" }); render(); { const el = $("#pa_bank_" + S.pay.accounts[S.pay.accounts.length-1].id); if (el) el.focus(); } break;
     case "delAcc": if (!mustEdit() || !arm("acc" + id)) return; { const a = S.pay.accounts.find(x => x.id === id); S.pay.accounts = S.pay.accounts.filter(x => x.id !== id); commit("Rekening " + ((a && a.bank) || "") + " dihapus"); } break;
+    case "payout": if (!mustEdit()) return; proofSet(ui.round, id, (payoutOf(ui.round, id) || {}).proof); commit(memberName(id) + " sudah ditransfer " + rp(payout(ui.round)) + " (Putaran " + (ui.round+1) + ")"); break;
+    case "unpayout": {
+      if (!mustEdit() || !arm("po" + id)) return;
+      const po = payoutOf(ui.round, id);
+      if (po && po.proof) saveProof(ui.round, id, null);
+      delete (S.payouts[ui.round] || {})[id];
+      commit("Tanda transfer untuk " + memberName(id) + " dibatalkan (Putaran " + (ui.round+1) + ")"); break;
+    }
+    case "delProof": if (!mustEdit() || !arm("pf" + id)) return; saveProof(ui.round, id, null); break;
+    case "viewProof": openProof(+b.dataset.r, id); break;
     case "delQr": if (!mustEdit() || !arm("delQr")) return; saveQr(null); break;
     case "filter": ui.filter = b.dataset.v; render(); break;
     case "prev": ui.round = Math.max(0, ui.round-1); render(); break;
@@ -734,8 +818,21 @@ app.addEventListener("submit", async e => {
 app.addEventListener("input", e => {
   if (e.target.id === "q") { ui.q = e.target.value; const l = $("#list"); if (l) l.innerHTML = listRows(ui.round); }
 });
+document.addEventListener("click", e => {
+  if (!ui.modal) return;
+  const b = e.target.closest("[data-act]");
+  if (e.target.id === "modal" || (b && b.dataset.act === "closeModal")) { ui.modal = null; renderModal(); }
+  else if (b && b.dataset.act === "dlProof" && ui.modal.img) downloadUrl("bukti-transfer-" + slug() + "-p" + (ui.modal.r+1) + "-" + memberName(ui.modal.id).toLowerCase().replace(/[^a-z0-9]+/g, "-") + (ui.modal.img.startsWith("data:image/png") ? ".png" : ".jpg"), ui.modal.img);
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape" && ui.modal) { ui.modal = null; renderModal(); } });
 app.addEventListener("change", e => {
   const t = e.target;
+  if (t.classList.contains("proofFile") && t.files && t.files[0]) {
+    if (!mustEdit()) return;
+    const r = +t.dataset.r, id = t.dataset.id;
+    fileToDataUrl(t.files[0]).then(d => saveProof(r, id, d), err => toast(err.message));
+    return;
+  }
   if (t.id === "qrFile" && t.files && t.files[0]) {
     if (!mustEdit()) return;
     fileToQrDataUrl(t.files[0]).then(saveQr, err => toast(err.message));
