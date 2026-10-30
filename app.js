@@ -19,7 +19,9 @@ const RECENT_KEY = "buku-arisan-recent";
 
 const blank = (o) => {
   const d = Object.assign({ v:1, sample:false, name:"Arisan", defaultAmount:200000, cycle:"bulanan", winnersPerRound:1,
-    startDate:new Date().toISOString().slice(0,10), current:0, members:[], payments:{}, winners:{}, log:[] }, o || {});
+    startDate:new Date().toISOString().slice(0,10), current:0, members:[], payments:{}, winners:{}, log:[], pay:null }, o || {});
+  const pay = d.pay && typeof d.pay === "object" ? d.pay : {};
+  d.pay = { note: String(pay.note || ""), accounts: (Array.isArray(pay.accounts) ? pay.accounts : []).map(a => ({ id: a.id || ("a" + Math.random().toString(36).slice(2,8)), bank: String(a.bank||""), number: String(a.number||""), holder: String(a.holder||"") })) };
   // kompatibel dengan data lama: winners[r] dulu berupa string, sekarang array id
   const w = {};
   for (const k in (d.winners || {})) { const v = d.winners[k]; const arr = Array.isArray(v) ? v.filter(Boolean) : (v ? [v] : []); if (arr.length) w[k] = arr; }
@@ -40,6 +42,9 @@ let saveState = "idle";        // idle | saving | saved | error
 let saveTimer = null, saving = false, dirty = false;
 let channel = null;
 let loadError = "";
+let qrData = null, qrHash = null;   // gambar QR disimpan terpisah dari data utama
+const DEMO_QR_KEY = "buku-arisan-demo-qr";
+const BANKS = ["BCA","BRI","BNI","Mandiri","BSI","CIMB Niaga","Permata","Danamon","BTN","OCBC","Bank Jago","SeaBank","blu by BCA Digital","Jenius","DANA","OVO","GoPay","ShopeePay","LinkAja"];
 
 const ui = { rollCount: 1, round: 0, tab: "anggota", filter: "semua", q: "", editing: null, armed: {}, rolling: false, rollName: "", login: false, loginErr: "", createErr: "", busy: false };
 
@@ -79,6 +84,7 @@ const readOnly = () => !isAdmin;
 const shareUrl = () => location.origin + location.pathname + "?g=" + GID;
 const icon = { check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>' };
 const ERR = {
+  invalid_image: "File harus berupa gambar PNG, JPG, atau WebP.",
   invalid_pin: "PIN salah.", locked: "Terlalu banyak percobaan salah. Coba lagi 15 menit lagi.",
   not_found: "Arisan tidak ditemukan.", pin_too_short: "PIN minimal 4 karakter.",
   name_required: "Nama arisan wajib diisi.", too_large: "Data terlalu besar."
@@ -95,6 +101,10 @@ async function copy(text, done){
     const ta = $("#copyFallback");
     if (ta){ ta.hidden = false; ta.value = text; ta.focus(); ta.select(); toast("Teks sudah dipilih, tekan Ctrl/⌘+C"); }
   }
+}
+function downloadUrl(filename, url){
+  const a = document.createElement("a"); a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); setTimeout(() => a.remove(), 500);
 }
 function download(filename, text, type){
   const blob = new Blob([text], {type: type || "text/plain"});
@@ -157,10 +167,19 @@ function applyRemote(res){
   ui.round = Math.min(ui.round, totalRounds()-1);
   document.title = S.name + " · Buku Arisan";
 }
+async function syncQr(hash){
+  hash = hash || null;
+  if (hash === qrHash) return;
+  qrHash = hash;
+  if (!hash) { qrData = null; render(); return; }
+  try { qrData = await rpc("get_arisan_qr", { p_id: GID }); } catch(e) { qrHash = null; }
+  render();
+}
 async function loadRemote(force){
   try {
     const res = await rpc("get_arisan", { p_id: GID });
     if (!res) { view = "notfound"; render(); return; }
+    syncQr(res.qr_hash);
     if (force || res.version > version) {
       const first = view !== "app";
       applyRemote(res);
@@ -176,7 +195,7 @@ function startSync(){
   channel = sb.channel("arisan-" + GID, { config: { broadcast: { self: false } } });
   channel.on("broadcast", { event: "updated" }, ({ payload }) => {
     if (payload && payload.version > version && !pendingLocal()) loadRemote(false);
-  }).subscribe();
+  }).on("broadcast", { event: "qr" }, ({ payload }) => { if (payload) syncQr(payload.qr_hash); }).subscribe();
   setInterval(() => { if (document.visibilityState === "visible" && !pendingLocal()) loadRemote(false); }, 20000);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !pendingLocal()) loadRemote(false); });
 }
@@ -194,6 +213,7 @@ async function boot(){
   if (mode === "demo") {
     let L = null; try { L = JSON.parse(lsGet(DEMO_KEY) || "null"); } catch(e){}
     S = blank(L && L.v === 1 ? L : JSON.parse(JSON.stringify(SAMPLE)));
+    qrData = lsGet(DEMO_QR_KEY);
     isAdmin = true; ui.round = S.current; view = "app"; render(); return;
   }
   if (!GID) { view = "landing"; render(); return; }
@@ -334,6 +354,7 @@ function viewApp(){
   html += '<div><div class="eyebrow" style="margin-bottom:8px">Belum dapat</div><div class="queue">'
     + (notYet.length ? notYet.map(m => '<span class="chip">' + esc(m.name) + '</span>').join("") : '<span class="muted">Tidak ada</span>') + '</div></div></section></div>';
 
+  html += viewPay(r);
   const tabs = [["anggota","Anggota & checklist"],["riwayat","Riwayat"]].concat(RO ? [] : [["pengaturan","Pengaturan"]]);
   if (RO && ui.tab === "pengaturan") ui.tab = "anggota";
   html += '<div class="tabs" role="tablist">' + tabs.map(([k,l]) => '<button role="tab" data-act="tab" data-v="' + k + '" aria-selected="' + (ui.tab===k) + '">' + l + '</button>').join("") + '</div>';
@@ -375,7 +396,7 @@ function listRows(r){
     const sub = [paid ? '<span class="chip ok">Lunas ' + fShort(S.payments[r][m.id]) + '</span>' : '<span class="chip warn">Belum transfer</span>'];
     if (wr >= 0) sub.push('<span class="chip gold">Dapat putaran ' + (wr+1) + '</span>');
     if (!paid && m.phone && !RO) {
-      const txt = "Halo " + m.name + ", pengingat iuran " + (S.name||"arisan") + " putaran " + (r+1) + " sebesar " + rp(m.amount) + " ya. Terima kasih.";
+      const txt = "Halo " + m.name + ", pengingat iuran " + (S.name||"arisan") + " putaran " + (r+1) + " sebesar " + rp(m.amount) + " ya. Terima kasih." + payLines();
       sub.push('<a class="btn" style="padding:3px 9px;font-size:12px" target="_blank" rel="noopener" href="https://wa.me/' + esc(m.phone) + '?text=' + encodeURIComponent(txt) + '">Ingatkan via WA</a>');
     }
     return '<div class="row"><button class="check" role="checkbox" aria-checked="' + paid + '" aria-label="' + esc(m.name) + ' sudah transfer" data-act="toggle" data-id="' + esc(m.id) + '" data-r="' + r + '"' + (RO?' disabled':'') + '>' + icon.check + '</button>'
@@ -437,6 +458,7 @@ function viewSettings(){
     + '<label class="f">Impor data<textarea id="importBox" placeholder="Tempel data cadangan di sini"></textarea></label>'
     + '<div class="actions"><button data-act="importJson">Impor</button>'
     + '<button class="danger' + (ui.armed.reset?' armed':'') + '" data-act="reset">' + (ui.armed.reset ? 'Hapus semua data?' : 'Hapus semua data') + '</button></div></section>';
+  h += viewPaySettings();
   if (mode === "remote") {
     h += '<section class="panel"><h2>Ganti PIN bendahara</h2><form id="pinForm" class="form" autocomplete="off">'
       + '<label class="f">PIN lama<input id="p_old" type="password" inputmode="numeric" required></label>'
@@ -444,6 +466,110 @@ function viewSettings(){
       + '<div class="actions" style="grid-column:1/-1"><button type="submit">Ganti PIN</button></div></form></section>';
   }
   return h + '</div>';
+}
+
+/* ---------- QR pembayaran ---------- */
+function fileToQrDataUrl(file){
+  return new Promise((resolve, reject) => {
+    if (!file || !/^image\//.test(file.type)) return reject(new Error(ERR.invalid_image));
+    if (file.size > 15 * 1024 * 1024) return reject(new Error("Gambar terlalu besar (maks 15 MB)."));
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      // Coba resolusi besar dulu supaya kotak QR tetap tajam; turunkan bila ukuran file terlalu besar.
+      for (const max of [1400, 1000, 720]) {
+        const sc = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.naturalWidth * sc); c.height = Math.round(img.naturalHeight * sc);
+        const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height);
+        g.imageSmoothingQuality = "high"; g.drawImage(img, 0, 0, c.width, c.height);
+        for (const [type, q] of [["image/png"], ["image/jpeg", 0.92], ["image/jpeg", 0.82]]) {
+          const out = c.toDataURL(type, q);
+          if (out.length <= 600000) return resolve(out);
+        }
+      }
+      reject(new Error("Gambar terlalu besar setelah dikompres. Coba potong gambarnya di sekitar QR saja."));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Gambar tidak bisa dibaca.")); };
+    img.src = url;
+  });
+}
+async function saveQr(dataUrl){
+  if (!mustEdit()) return;
+  ui.qrBusy = true; render();
+  try {
+    if (mode === "demo") { lsSet(DEMO_QR_KEY, dataUrl || null); qrData = dataUrl || null; }
+    else {
+      const res = await rpc("set_arisan_qr", { p_id: GID, p_pin: pin, p_qr: dataUrl || "" });
+      if (!res || !res.ok) {
+        const code = res && res.error;
+        if (code === "invalid_pin" || code === "locked") logout();
+        throw new Error(ERR[code] || "Gagal menyimpan gambar QR.");
+      }
+      qrData = dataUrl || null; qrHash = res.qr_hash || null;
+      if (channel) channel.send({ type: "broadcast", event: "qr", payload: { qr_hash: qrHash } });
+    }
+    S.log.unshift({ t: Date.now(), m: dataUrl ? "Gambar QR pembayaran diperbarui" : "Gambar QR pembayaran dihapus" });
+    ui.qrBusy = false; commit();
+    toast(dataUrl ? "QR pembayaran tersimpan" : "QR pembayaran dihapus");
+  } catch(e) { ui.qrBusy = false; render(); toast(e.message || "Gagal menyimpan gambar QR."); }
+}
+const cleanNo = n => String(n || "").replace(/[\s.\-]/g, "");
+const hasPayInfo = () => S.pay.accounts.some(a => a.number.trim()) || !!qrData;
+function payLines(){
+  const acc = S.pay.accounts.filter(a => a.number.trim());
+  if (!acc.length && !qrData) return "";
+  return "\n\n*Transfer ke:*\n" + acc.map(a => "• " + (a.bank || "Rekening") + " " + a.number + (a.holder ? " a.n. " + a.holder : "")).join("\n")
+    + (qrData ? (acc.length ? "\n" : "") + "• QRIS: scan di " + (mode === "remote" ? shareUrl() : "aplikasi arisan") : "")
+    + (S.pay.note ? "\n" + S.pay.note : "");
+}
+
+function viewPay(r){
+  const RO = readOnly();
+  const acc = S.pay.accounts.filter(a => a.number.trim());
+  if (!acc.length && !qrData) {
+    return RO ? '' : '<div class="banner info"><span>Belum ada info rekening. Tambahkan nomor rekening atau QRIS supaya anggota bisa langsung transfer.</span><button data-act="goPay">Atur pembayaran</button></div>';
+  }
+  let h = '<section class="panel" aria-label="Info transfer"><div class="toolbar"><h2>Transfer iuran</h2>'
+    + '<span class="chip acc">Putaran ' + (r+1) + ' · ' + rp(S.defaultAmount) + ' / orang</span></div>'
+    + '<div class="pay-grid' + (qrData && acc.length ? '' : ' single') + '">';
+  if (acc.length) {
+    h += '<div class="accts">' + acc.map(a => '<div class="acct"><div class="eyebrow">' + esc(a.bank || "Rekening") + '</div>'
+      + '<div class="no num">' + esc(a.number) + '</div>'
+      + (a.holder ? '<div class="holder">a.n. ' + esc(a.holder) + '</div>' : '')
+      + '<button data-act="copyNo" data-v="' + esc(cleanNo(a.number)) + '">Salin nomor</button></div>').join("")
+      + (S.pay.note ? '<p class="pay-note">' + esc(S.pay.note) + '</p>' : '') + '</div>';
+  }
+  if (qrData) {
+    h += '<figure class="qr"><img src="' + esc(qrData) + '" alt="QR code pembayaran ' + esc(S.name) + '">'
+      + '<figcaption><b>Scan QRIS</b><span>Buka aplikasi bank atau e-wallet, lalu pilih scan QR. Kalau membuka halaman ini di HP, unduh gambarnya lalu pilih "scan dari galeri".</span></figcaption>'
+      + '<button data-act="dlQr">Unduh gambar QR</button></figure>';
+    if (!acc.length && S.pay.note) h += '<p class="pay-note">' + esc(S.pay.note) + '</p>';
+  }
+  return h + '</div></section>';
+}
+
+function viewPaySettings(){
+  let h = '<section class="panel" id="paySettings" style="grid-column:1/-1"><h2>Info pembayaran</h2>'
+    + '<p class="muted" style="margin:0">Ditampilkan ke semua anggota di halaman utama dan disertakan di pengingat WhatsApp.</p>'
+    + '<datalist id="bankList">' + BANKS.map(b => '<option value="' + esc(b) + '">').join("") + '</datalist>'
+    + '<div class="pay-edit">';
+  h += '<div class="stack"><div class="eyebrow">Rekening & e-wallet</div>';
+  h += S.pay.accounts.length ? S.pay.accounts.map(a => '<div class="acct-edit">'
+      + '<label class="f">Bank / e-wallet<input id="pa_bank_' + esc(a.id) + '" data-acc="' + esc(a.id) + '" data-k="bank" list="bankList" maxlength="40" value="' + esc(a.bank) + '" placeholder="mis. BCA"></label>'
+      + '<label class="f">Nomor rekening / HP<input id="pa_number_' + esc(a.id) + '" data-acc="' + esc(a.id) + '" data-k="number" inputmode="numeric" maxlength="40" value="' + esc(a.number) + '" placeholder="mis. 1234567890"></label>'
+      + '<label class="f">Atas nama<input id="pa_holder_' + esc(a.id) + '" data-acc="' + esc(a.id) + '" data-k="holder" maxlength="80" value="' + esc(a.holder) + '" placeholder="mis. Siti Aminah"></label>'
+      + '<button class="ghost danger' + (ui.armed["acc"+a.id]?' armed':'') + '" data-act="delAcc" data-id="' + esc(a.id) + '">' + (ui.armed["acc"+a.id] ? 'Hapus?' : 'Hapus') + '</button></div>').join("")
+    : '<div class="muted">Belum ada rekening.</div>';
+  h += '<div class="actions"><button data-act="addAcc">+ Tambah rekening</button></div>'
+    + '<label class="f">Catatan untuk anggota (opsional)<textarea id="pay_note" maxlength="300" style="font-family:var(--f-body);font-size:14px;min-height:70px" placeholder="mis. Tulis nama di berita transfer. Batas transfer H-1 kocokan.">' + esc(S.pay.note) + '</textarea></label></div>';
+  h += '<div class="stack"><div class="eyebrow">Gambar QRIS</div>'
+    + (qrData ? '<figure class="qr qr-sm"><img src="' + esc(qrData) + '" alt="Pratinjau QR pembayaran"></figure>' : '<div class="qr-empty">Belum ada gambar QR</div>')
+    + '<div class="actions"><label class="btn" for="qrFile">' + (ui.qrBusy ? 'Menyimpan…' : (qrData ? 'Ganti gambar' : 'Unggah gambar QR')) + '</label>'
+    + '<input id="qrFile" type="file" accept="image/png,image/jpeg,image/webp" hidden' + (ui.qrBusy ? ' disabled' : '') + '>'
+    + (qrData ? '<button class="ghost danger' + (ui.armed.delQr?' armed':'') + '" data-act="delQr">' + (ui.armed.delQr ? 'Yakin hapus QR?' : 'Hapus QR') + '</button>' : '') + '</div>'
+    + '<p class="muted" style="margin:0;font-size:13px">Pakai screenshot QRIS dari aplikasi merchant atau foto yang jelas. Gambar otomatis diperkecil supaya ringan dibuka.</p></div>';
+  return h + '</div></section>';
 }
 
 /* ---------- actions ---------- */
@@ -475,7 +601,7 @@ function reminderText(r){
   const link = mode === "remote" ? "\n\nCek status: " + shareUrl() : "";
   return "*" + (S.name||"Arisan") + " — Putaran " + (r+1) + "*\nKocokan: " + fDate(roundDate(r), {weekday:"long", day:"numeric", month:"long"}) + "\n\nYang belum transfer:\n"
     + unpaid.map((m,i) => (i+1) + ". " + m.name + " (" + rp(m.amount) + ")").join("\n")
-    + "\n\nSudah transfer " + (S.members.length - unpaid.length) + " dari " + S.members.length + " orang. Mohon segera transfer ya, terima kasih." + link;
+    + "\n\nSudah transfer " + (S.members.length - unpaid.length) + " dari " + S.members.length + " orang. Mohon segera transfer ya, terima kasih." + payLines() + link;
 }
 function summaryText(r){
   const w = winnersOf(r);
@@ -499,6 +625,12 @@ app.addEventListener("click", e => {
   switch(act){
     case "reload": location.reload(); break;
     case "tab": ui.tab = b.dataset.v; ui.editing = null; render(); break;
+    case "goPay": ui.tab = "pengaturan"; render(); { const el = $("#paySettings"); if (el && el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "start" }); } break;
+    case "copyNo": copy(b.dataset.v, "Nomor " + b.dataset.v + " tersalin"); break;
+    case "dlQr": if (qrData) downloadUrl("qris-" + slug() + (qrData.startsWith("data:image/png") ? ".png" : ".jpg"), qrData); break;
+    case "addAcc": if (!mustEdit()) return; S.pay.accounts.push({ id: "a" + Date.now().toString(36), bank: "", number: "", holder: "" }); render(); { const el = $("#pa_bank_" + S.pay.accounts[S.pay.accounts.length-1].id); if (el) el.focus(); } break;
+    case "delAcc": if (!mustEdit() || !arm("acc" + id)) return; { const a = S.pay.accounts.find(x => x.id === id); S.pay.accounts = S.pay.accounts.filter(x => x.id !== id); commit("Rekening " + ((a && a.bank) || "") + " dihapus"); } break;
+    case "delQr": if (!mustEdit() || !arm("delQr")) return; saveQr(null); break;
     case "filter": ui.filter = b.dataset.v; render(); break;
     case "prev": ui.round = Math.max(0, ui.round-1); render(); break;
     case "next": ui.round = Math.min(totalRounds()-1, ui.round+1); render(); break;
@@ -604,6 +736,19 @@ app.addEventListener("input", e => {
 });
 app.addEventListener("change", e => {
   const t = e.target;
+  if (t.id === "qrFile" && t.files && t.files[0]) {
+    if (!mustEdit()) return;
+    fileToQrDataUrl(t.files[0]).then(saveQr, err => toast(err.message));
+    return;
+  }
+  if (t.dataset && t.dataset.acc) {
+    if (!mustEdit()) return;
+    const a = S.pay.accounts.find(x => x.id === t.dataset.acc); if (!a) return;
+    a[t.dataset.k] = t.value.trim();
+    commit(a.number ? "Info rekening " + (a.bank || "") + " diperbarui" : null);
+    return;
+  }
+  if (t.id === "pay_note") { if (!mustEdit()) return; S.pay.note = t.value.trim(); commit("Catatan pembayaran diperbarui"); return; }
   if (t.id === "manualWin" && t.value) { if (!mustEdit()) return; addWinners(ui.round, [t.value]); return; }
   if (t.classList.contains("repSel") && t.value) {
     if (!mustEdit()) return;

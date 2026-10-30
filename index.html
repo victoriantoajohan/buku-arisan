@@ -141,12 +141,34 @@ footer{font-size:12.5px;color:var(--muted);text-align:center}
 .recent a{color:var(--accent);font-weight:600;text-decoration:none}
 .recent a:hover{text-decoration:underline}
 .err{color:var(--warn);font-size:13.5px;font-weight:600}
+/* info pembayaran */
+.pay-grid{display:grid;grid-template-columns:minmax(0,1fr) 260px;gap:20px;align-items:start}
+.pay-grid.single{grid-template-columns:minmax(0,1fr)}
+.pay-grid.single .qr{max-width:300px}
+@media (max-width:680px){.pay-grid{grid-template-columns:minmax(0,1fr)}}
+.accts{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;min-width:0}
+.acct{border:1px solid var(--line);border-radius:12px;padding:14px;display:flex;flex-direction:column;gap:4px;align-items:flex-start;min-width:0}
+.acct .no{font-size:21px;font-weight:600;letter-spacing:.04em;overflow-wrap:anywhere}
+.acct .holder{color:var(--muted);font-size:13.5px;margin-bottom:6px}
+.pay-note{grid-column:1/-1;margin:0;padding:10px 12px;border-radius:10px;background:var(--sunk);font-size:14px;white-space:pre-line}
+.qr{margin:0;display:flex;flex-direction:column;gap:10px;align-items:center;text-align:center}
+.qr img{display:block;width:100%;max-width:260px;height:auto;background:#fff;padding:10px;border-radius:14px;border:1px solid var(--line)}
+.qr figcaption{display:flex;flex-direction:column;gap:2px;font-size:13px;color:var(--muted)}
+.qr figcaption b{color:var(--ink);font-size:14px}
+.qr-sm img{max-width:180px}
+.qr-empty{display:grid;place-items:center;width:180px;max-width:100%;aspect-ratio:1;border:2px dashed var(--line);border-radius:14px;color:var(--muted);font-size:13px;text-align:center;padding:10px}
+.pay-edit{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:24px}
+@media (max-width:760px){.pay-edit{grid-template-columns:minmax(0,1fr)}}
+.stack{display:flex;flex-direction:column;gap:12px;min-width:0}
+.acct-edit{display:grid;grid-template-columns:1fr 1.3fr 1.3fr auto;gap:8px;align-items:end;padding-bottom:12px;border-bottom:1px solid var(--line)}
+@media (max-width:560px){.acct-edit{grid-template-columns:1fr 1fr}.acct-edit label:nth-child(3){grid-column:1/-1}}
+label.btn{cursor:pointer}
 </style>
 <script src="config.js?v=2aee2ad8"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 </head>
 <body>
 <div id="app"></div>
-<script src="app.js?v=e3e7e52d"></script>
+<script src="app.js?v=7529d6ed"></script>
 </body>
 </html>

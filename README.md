@@ -66,6 +66,12 @@ Domain sendiri (misalnya `arisan.namamu.id`) bisa ditambahkan dari pengaturan do
 3. Klik **Salin link grup** dan bagikan ke grup WhatsApp. Anggota bisa melihat siapa yang sudah atau belum transfer.
 4. Bendahara di HP lain cukup buka link yang sama → **Masuk bendahara** → masukkan PIN.
 
+## Info pembayaran (rekening & QRIS)
+
+Bendahara mengisinya di **Pengaturan → Info pembayaran**: nama bank atau e-wallet, nomor, atas nama, catatan, dan gambar QRIS. Semua anggota melihat panel **Transfer iuran** di halaman utama, lengkap dengan tombol *Salin nomor* dan *Unduh gambar QR*. Info ini juga otomatis ikut di pengingat WhatsApp.
+
+Gambar QR disimpan di kolom terpisah (`pay_qr`) dan hanya diunduh ulang bila berubah. Untuk project yang dibuat sebelum fitur ini ada, jalankan `supabase/migrations/002_payment_qr.sql` sekali di SQL Editor. `schema.sql` sudah mencakupnya untuk instalasi baru.
+
 ## Catatan
 
 - **Realtime**: broadcast publik aktif secara default. Kalau di *Realtime → Settings* kamu mengaktifkan "private channels only", matikan opsi itu. Tanpa realtime pun data tetap tersinkron lewat polling setiap 20 detik.
