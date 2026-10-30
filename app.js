@@ -1,0 +1,581 @@
+/* Buku Arisan — frontend (vanilla JS, tanpa build step)
+ * Penyimpanan: Supabase RPC (lihat supabase/schema.sql). Tanpa config → mode demo (localStorage).
+ */
+(function(){
+"use strict";
+const $ = s => document.querySelector(s);
+const app = $("#app");
+
+/* ---------- konfigurasi & koneksi ---------- */
+const CFG = window.ARISAN_CONFIG || {};
+const params = new URLSearchParams(location.search);
+const GID = params.get("g");
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const hasBackend = !!(CFG.supabaseUrl && CFG.supabaseAnonKey && window.supabase);
+const sb = hasBackend ? window.supabase.createClient(CFG.supabaseUrl, CFG.supabaseAnonKey, { auth: { persistSession: false } }) : null;
+const DEMO_KEY = "buku-arisan-demo-v1";
+const PIN_KEY = id => "buku-arisan-pin-" + id;
+const RECENT_KEY = "buku-arisan-recent";
+
+const blank = (o) => Object.assign({ v:1, sample:false, name:"Arisan", defaultAmount:200000, cycle:"bulanan",
+  startDate:new Date().toISOString().slice(0,10), current:0, members:[], payments:{}, winners:{}, log:[] }, o || {});
+
+const SAMPLE = {"v":1,"sample":true,"name":"Arisan Keluarga Besar","defaultAmount":200000,"cycle":"bulanan","startDate":"2026-09-01","current":2,"members":[{"id":"m1","name":"Bu Ratna","amount":200000,"phone":"6281234500001"},{"id":"m2","name":"Pak Hendra","amount":200000,"phone":"6281234500002"},{"id":"m3","name":"Siti Aminah","amount":200000,"phone":""},{"id":"m4","name":"Dewi Lestari","amount":200000,"phone":"6281234500004"},{"id":"m5","name":"Mas Bayu","amount":200000,"phone":""},{"id":"m6","name":"Tante Lina","amount":400000,"phone":"6281234500006"},{"id":"m7","name":"Om Agus","amount":200000,"phone":""},{"id":"m8","name":"Rina Wulandari","amount":200000,"phone":"6281234500008"}],"payments":{"0":{"m1":"2026-08-29T09:10:00Z","m2":"2026-08-30T03:00:00Z","m3":"2026-08-30T05:00:00Z","m4":"2026-08-31T02:00:00Z","m5":"2026-08-31T08:00:00Z","m6":"2026-08-28T07:00:00Z","m7":"2026-09-01T01:00:00Z","m8":"2026-08-30T10:00:00Z"},"1":{"m1":"2026-09-28T09:10:00Z","m2":"2026-09-29T03:00:00Z","m3":"2026-09-30T05:00:00Z","m4":"2026-09-30T02:00:00Z","m5":"2026-10-02T08:00:00Z","m6":"2026-09-27T07:00:00Z","m7":"2026-09-30T01:00:00Z","m8":"2026-09-29T10:00:00Z"},"2":{"m1":"2026-10-27T09:10:00Z","m4":"2026-10-28T02:00:00Z","m6":"2026-10-26T07:00:00Z","m8":"2026-10-29T10:00:00Z","m2":"2026-10-29T12:00:00Z"}},"winners":{"0":"m4","1":"m7"},"log":[]};
+
+let S = blank();
+let view = "loading";          // loading | landing | app | notfound | error
+let mode = hasBackend ? "remote" : "demo";
+let isAdmin = false;
+let pin = null;
+let version = 0;
+let saveState = "idle";        // idle | saving | saved | error
+let saveTimer = null, saving = false, dirty = false;
+let channel = null;
+let loadError = "";
+
+const ui = { round: 0, tab: "anggota", filter: "semua", q: "", editing: null, armed: {}, rolling: false, rollName: "", login: false, loginErr: "", createErr: "", busy: false };
+
+/* ---------- helpers ---------- */
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const rp = n => "Rp " + Math.round(Number(n)||0).toLocaleString("id-ID");
+const uid = () => "m" + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+const totalRounds = () => Math.max(1, S.members.length);
+const roundDate = i => {
+  const d = new Date((S.startDate || "2026-01-01") + "T00:00:00");
+  if (S.cycle === "mingguan") d.setDate(d.getDate() + 7*i);
+  else if (S.cycle === "2mingguan") d.setDate(d.getDate() + 14*i);
+  else d.setMonth(d.getMonth() + i);
+  return d;
+};
+const fDate = (d, o) => d.toLocaleDateString("id-ID", o || {day:"numeric", month:"short", year:"numeric"});
+const fShort = iso => fDate(new Date(iso), {day:"numeric", month:"short"});
+const paidMap = r => (S.payments[r] = S.payments[r] || {});
+const isPaid = (r, id) => !!(S.payments[r] && S.payments[r][id]);
+const winnerOf = r => S.winners[r] ? S.members.find(m => m.id === S.winners[r]) : null;
+const wonRound = id => { for (const k in S.winners) if (S.winners[k] === id) return +k; return -1; };
+const pot = () => S.members.reduce((a, m) => a + (Number(m.amount)||0), 0);
+const collected = r => S.members.reduce((a, m) => a + (isPaid(r, m.id) ? Number(m.amount)||0 : 0), 0);
+const cycleLabel = {bulanan:"Bulanan", "2mingguan":"Dua mingguan", mingguan:"Mingguan"};
+const normPhone = p => { let d = String(p||"").replace(/\D/g, ""); if (d.startsWith("0")) d = "62" + d.slice(1); return d; };
+const digits = v => Number(String(v||"").replace(/\D/g, "")) || 0;
+const lsGet = k => { try { return localStorage.getItem(k); } catch(e){ return null; } };
+const lsSet = (k, v) => { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch(e){} };
+const readOnly = () => !isAdmin;
+const shareUrl = () => location.origin + location.pathname + "?g=" + GID;
+const icon = { check:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>' };
+const ERR = {
+  invalid_pin: "PIN salah.", locked: "Terlalu banyak percobaan salah. Coba lagi 15 menit lagi.",
+  not_found: "Arisan tidak ditemukan.", pin_too_short: "PIN minimal 4 karakter.",
+  name_required: "Nama arisan wajib diisi.", too_large: "Data terlalu besar."
+};
+
+function toast(msg){
+  const old = $(".toast"); if (old) old.remove();
+  const t = document.createElement("div"); t.className = "toast"; t.textContent = msg; t.setAttribute("role","status");
+  document.body.appendChild(t); setTimeout(() => t.remove(), 2600);
+}
+async function copy(text, done){
+  try { await navigator.clipboard.writeText(text); toast(done || "Tersalin"); }
+  catch(e){
+    const ta = $("#copyFallback");
+    if (ta){ ta.hidden = false; ta.value = text; ta.focus(); ta.select(); toast("Teks sudah dipilih, tekan Ctrl/⌘+C"); }
+  }
+}
+function download(filename, text, type){
+  const blob = new Blob([text], {type: type || "text/plain"});
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = filename;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+}
+function arm(key){
+  if (ui.armed[key]) { delete ui.armed[key]; return true; }
+  ui.armed = {}; ui.armed[key] = true;
+  setTimeout(() => { if (ui.armed[key]) { delete ui.armed[key]; render(); } }, 3500);
+  render(); return false;
+}
+function rememberRecent(id, name){
+  let list = []; try { list = JSON.parse(lsGet(RECENT_KEY) || "[]"); } catch(e){}
+  list = [{id, name}].concat(list.filter(x => x.id !== id)).slice(0, 8);
+  lsSet(RECENT_KEY, JSON.stringify(list));
+}
+async function rpc(fn, args){
+  const { data, error } = await sb.rpc(fn, args);
+  if (error) throw error;
+  return data;
+}
+
+/* ---------- persistence ---------- */
+function commit(msg){
+  if (msg){ S.log.unshift({t: Date.now(), m: msg}); S.log = S.log.slice(0, 60); }
+  render();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(save, mode === "remote" ? 600 : 150);
+}
+async function save(){
+  saveTimer = null;
+  if (mode === "demo") { lsSet(DEMO_KEY, JSON.stringify(S)); saveState = "saved"; renderStatus(); return; }
+  if (!isAdmin) return;
+  if (saving) { dirty = true; return; }
+  saving = true; dirty = false; saveState = "saving"; renderStatus();
+  try {
+    const res = await rpc("save_arisan", { p_id: GID, p_pin: pin, p_data: S, p_version: version });
+    if (res && res.ok) {
+      version = res.version; saveState = "saved";
+      rememberRecent(GID, S.name);
+      if (channel) channel.send({ type: "broadcast", event: "updated", payload: { version } });
+    } else {
+      const code = res && res.error;
+      if (code === "version_conflict") { toast("Ada perubahan dari bendahara lain. Data terbaru dimuat; ulangi perubahanmu bila perlu."); dirty = false; await loadRemote(true); }
+      else if (code === "invalid_pin" || code === "locked") { logout(); toast(ERR[code]); }
+      else { saveState = "error"; toast(ERR[code] || "Gagal menyimpan."); }
+    }
+  } catch(e) {
+    saveState = "error"; dirty = true; toast("Gagal tersambung. Perubahan akan dicoba simpan lagi.");
+    setTimeout(() => { if (dirty && !saveTimer) save(); }, 5000);
+  } finally {
+    saving = false; renderStatus();
+    if (dirty && isAdmin && saveState !== "error") save();
+  }
+}
+function applyRemote(res){
+  S = blank(Object.assign({}, res.data || {}, { name: (res.data && res.data.name) || res.name }));
+  version = res.version;
+  ui.round = Math.min(ui.round, totalRounds()-1);
+  document.title = S.name + " · Buku Arisan";
+}
+async function loadRemote(force){
+  try {
+    const res = await rpc("get_arisan", { p_id: GID });
+    if (!res) { view = "notfound"; render(); return; }
+    if (force || res.version > version) {
+      const first = view !== "app";
+      applyRemote(res);
+      if (first) ui.round = S.current;
+      view = "app"; render();
+    }
+  } catch(e) {
+    if (view !== "app") { view = "error"; loadError = e.message || String(e); render(); }
+  }
+}
+function pendingLocal(){ return saving || dirty || !!saveTimer || ui.rolling; }
+function startSync(){
+  channel = sb.channel("arisan-" + GID, { config: { broadcast: { self: false } } });
+  channel.on("broadcast", { event: "updated" }, ({ payload }) => {
+    if (payload && payload.version > version && !pendingLocal()) loadRemote(false);
+  }).subscribe();
+  setInterval(() => { if (document.visibilityState === "visible" && !pendingLocal()) loadRemote(false); }, 20000);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !pendingLocal()) loadRemote(false); });
+}
+async function tryLogin(p, silent){
+  try {
+    const res = await rpc("check_pin", { p_id: GID, p_pin: p });
+    if (res && res.ok) { pin = p; isAdmin = true; lsSet(PIN_KEY(GID), p); ui.login = false; ui.loginErr = ""; render(); if (!silent) toast("Masuk sebagai bendahara"); return; }
+    if (!silent) { ui.loginErr = ERR[res && res.error] || "Gagal masuk."; render(); }
+    else lsSet(PIN_KEY(GID), null);
+  } catch(e){ if (!silent) { ui.loginErr = "Gagal tersambung."; render(); } }
+}
+function logout(){ isAdmin = false; pin = null; lsSet(PIN_KEY(GID), null); render(); }
+
+async function boot(){
+  if (mode === "demo") {
+    let L = null; try { L = JSON.parse(lsGet(DEMO_KEY) || "null"); } catch(e){}
+    S = blank(L && L.v === 1 ? L : JSON.parse(JSON.stringify(SAMPLE)));
+    isAdmin = true; ui.round = S.current; view = "app"; render(); return;
+  }
+  if (!GID) { view = "landing"; render(); return; }
+  if (!UUID_RE.test(GID)) { view = "notfound"; render(); return; }
+  render();
+  await loadRemote(true);
+  if (view !== "app") return;
+  rememberRecent(GID, S.name);
+  startSync();
+  const saved = lsGet(PIN_KEY(GID));
+  if (saved) tryLogin(saved, true);
+}
+
+/* ---------- views ---------- */
+function statusChip(){
+  if (mode === "demo") return '<span class="chip gold"><i class="dot"></i>Mode demo · tersimpan di perangkat ini</span>';
+  if (!isAdmin) return '<span class="chip"><i class="dot"></i>Mode lihat</span>';
+  if (saveState === "saving") return '<span class="chip acc"><i class="dot"></i>Menyimpan…</span>';
+  if (saveState === "error") return '<span class="chip warn"><i class="dot"></i>Belum tersimpan</span>';
+  return '<span class="chip ok"><i class="dot"></i>Tersimpan online</span>';
+}
+function renderStatus(){ const el = $("#status"); if (el) el.innerHTML = statusChip(); }
+
+function render(){
+  const ae = document.activeElement && document.activeElement.id;
+  let html;
+  if (view === "loading") html = '<div class="wrap"><div class="empty">Memuat arisan…</div></div>';
+  else if (view === "landing") html = viewLanding();
+  else if (view === "notfound") html = '<div class="wrap landing"><div class="panel"><h2>Arisan tidak ditemukan</h2><p class="muted" style="margin:0">Periksa kembali link yang kamu terima dari bendahara.</p><div class="actions"><a class="btn" href="' + esc(location.pathname) + '">Buat arisan baru</a></div></div></div>';
+  else if (view === "error") html = '<div class="wrap landing"><div class="panel"><h2>Gagal memuat</h2><p class="muted" style="margin:0">' + esc(loadError) + '</p><div class="actions"><button data-act="reload">Coba lagi</button></div></div></div>';
+  else html = viewApp();
+  app.innerHTML = html;
+  if (ae && document.getElementById(ae) && ae !== "copyFallback") { const el = document.getElementById(ae); el.focus(); if (el.type === "search" && el.setSelectionRange) { const v = el.value.length; el.setSelectionRange(v, v); } }
+}
+
+function viewLanding(){
+  let recent = []; try { recent = JSON.parse(lsGet(RECENT_KEY) || "[]"); } catch(e){}
+  const today = new Date().toISOString().slice(0,10);
+  let h = '<div class="wrap landing"><header class="hero"><div class="eyebrow">Buku Arisan</div><h1>Catat iuran, kocok pemenang, kirim pengingat.</h1>'
+    + '<p>Buat arisan baru, lalu bagikan linknya ke grup. Semua anggota bisa melihat siapa yang sudah transfer, dan hanya bendahara yang memegang PIN bisa mengubah data.</p></header>';
+  if (recent.length) h += '<section class="panel recent"><h2>Arisan di perangkat ini</h2><div class="list">'
+    + recent.map(r => '<div class="row" style="grid-template-columns:1fr auto"><a href="?g=' + esc(r.id) + '">' + esc(r.name) + '</a><span class="chip">' + (lsGet(PIN_KEY(r.id)) ? 'Bendahara' : 'Anggota') + '</span></div>').join("") + '</div></section>';
+  h += '<section class="panel"><h2>Buat arisan baru</h2><form id="createForm" class="form" autocomplete="off">'
+    + '<label class="f" style="grid-column:1/-1">Nama arisan<input id="c_name" required maxlength="120" placeholder="mis. Arisan Ibu-Ibu RT 05"></label>'
+    + '<label class="f">Iuran per orang (Rp)<input id="c_amount" inputmode="numeric" value="200000"></label>'
+    + '<label class="f">Periode<select id="c_cycle">' + Object.entries(cycleLabel).map(([k,l]) => '<option value="' + k + '">' + l + '</option>').join("") + '</select></label>'
+    + '<label class="f">Tanggal kocokan pertama<input id="c_start" type="date" value="' + today + '"></label>'
+    + '<span></span>'
+    + '<label class="f">PIN bendahara<input id="c_pin" type="password" inputmode="numeric" minlength="4" required placeholder="minimal 4 angka"></label>'
+    + '<label class="f">Ulangi PIN<input id="c_pin2" type="password" inputmode="numeric" minlength="4" required></label>'
+    + (ui.createErr ? '<div class="err" style="grid-column:1/-1">' + esc(ui.createErr) + '</div>' : '')
+    + '<div class="actions" style="grid-column:1/-1"><button class="primary" type="submit"' + (ui.busy?' disabled':'') + '>' + (ui.busy ? 'Membuat…' : 'Buat arisan') + '</button></div>'
+    + '</form><p class="muted" style="margin:0;font-size:13px">Simpan PIN baik-baik. PIN tidak bisa dipulihkan, tapi bisa diganti selama kamu masih ingat PIN lama.</p></section></div>';
+  return h;
+}
+
+function viewApp(){
+  const r = Math.min(ui.round, totalRounds()-1);
+  ui.round = r;
+  const RO = readOnly();
+  const N = S.members.length, P = pot(), C = collected(r);
+  const paidN = S.members.filter(m => isPaid(r, m.id)).length;
+  const pct = P ? Math.round(C / P * 100) : 0;
+  const w = winnerOf(r);
+  const winnersSet = new Set(Object.values(S.winners));
+  const notYet = S.members.filter(m => !winnersSet.has(m.id));
+  const isCur = r === S.current;
+  const dis = RO ? ' disabled' : '';
+
+  let html = '<div class="wrap">';
+  html += '<header class="top"><div><div class="eyebrow">Buku Arisan</div><h1>' + esc(S.name || "Arisan") + '</h1>'
+    + '<div class="meta"><span>' + esc(cycleLabel[S.cycle] || "Bulanan") + '</span><span class="num">' + rp(S.defaultAmount) + ' / orang</span><span>' + N + ' anggota</span><span>Mulai ' + fDate(roundDate(0)) + '</span></div></div>'
+    + '<div class="hdr-actions"><span id="status">' + statusChip() + '</span>';
+  if (mode === "remote") {
+    html += '<button data-act="share">Salin link grup</button>';
+    html += isAdmin ? '<button class="ghost" data-act="logout">Keluar</button>' : '<button class="primary" data-act="openLogin">Masuk bendahara</button>';
+  }
+  html += '</div></header>';
+
+  if (ui.login && !isAdmin) {
+    html += '<form class="banner info login" id="loginForm"><label class="f">PIN bendahara<input id="pin" type="password" inputmode="numeric" autocomplete="current-password" required></label>'
+      + '<button class="primary" type="submit">Masuk</button><button type="button" class="ghost" data-act="closeLogin">Batal</button>'
+      + (ui.loginErr ? '<span class="err">' + esc(ui.loginErr) + '</span>' : '') + '</form>';
+  }
+  if (S.sample) html += '<div class="banner"><span><b>Ini data contoh.</b> Coba centang, kocok, dan lihat riwayatnya.</span><button data-act="clearSample">Mulai dari kosong</button></div>';
+  if (mode === "remote" && !isAdmin && !ui.login) html += '<div class="banner info"><span>Kamu sedang melihat status arisan. Bendahara bisa masuk dengan PIN untuk mengubah data.</span></div>';
+
+  html += '<div class="grid"><section class="panel" aria-label="Putaran">';
+  html += '<div class="round-nav"><div><div class="eyebrow">Putaran ' + (r+1) + ' dari ' + totalRounds() + (isCur ? ' · berjalan' : (r < S.current ? ' · selesai' : ' · akan datang')) + '</div>'
+    + '<h2>Kocokan ' + fDate(roundDate(r), {weekday:"long", day:"numeric", month:"long", year:"numeric"}) + '</h2></div>'
+    + '<div class="r"><button class="ghost" data-act="prev" aria-label="Putaran sebelumnya"' + (r<=0?' disabled':'') + '>‹ Sebelumnya</button>'
+    + '<button class="ghost" data-act="next" aria-label="Putaran berikutnya"' + (r>=totalRounds()-1?' disabled':'') + '>Berikutnya ›</button></div></div>';
+  html += '<div class="pot"><span class="eyebrow">Terkumpul</span><div class="big">' + rp(C) + '</div>'
+    + '<div class="muted">dari <span class="num">' + rp(P) + '</span> · ' + pct + '%</div>'
+    + '<div class="bar" role="progressbar" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100"><i style="width:' + pct + '%"></i></div></div>';
+  html += '<div class="stats"><div class="stat"><b>' + paidN + '/' + N + '</b><span>Sudah transfer</span></div>'
+    + '<div class="stat"><b>' + (N - paidN) + '</b><span>Belum transfer</span></div>'
+    + '<div class="stat"><b>' + rp(P - C) + '</b><span>Kurang</span></div></div>';
+  html += '<div class="actions">'
+    + '<button data-act="remind"' + (N-paidN===0?' disabled':'') + '>Salin pengingat WA</button>'
+    + '<button data-act="summary"' + (N===0?' disabled':'') + '>Salin rekap</button>'
+    + (RO ? '' : '<button data-act="allPaid"' + (N===0||paidN===N?' disabled':'') + '>' + (ui.armed.allPaid ? 'Yakin tandai semua?' : 'Tandai semua lunas') + '</button>')
+    + (!RO && isCur && r < totalRounds()-1 ? '<button class="primary" data-act="advance">' + (ui.armed.advance ? 'Yakin lanjut?' : 'Mulai putaran ' + (r+2)) + '</button>' : '')
+    + (!RO && !isCur ? '<button data-act="setCurrent">Jadikan putaran berjalan</button>' : '')
+    + '</div><textarea id="copyFallback" hidden aria-label="Teks untuk disalin"></textarea></section>';
+
+  html += '<section class="panel" aria-label="Kocokan"><div class="toolbar"><h2>Kocokan</h2><span class="chip gold">' + notYet.length + ' belum dapat</span></div>';
+  if (ui.rolling) {
+    html += '<div class="drum"><span class="eyebrow">Mengocok…</span><div class="slip rolling" id="rollName">' + esc(ui.rollName) + '</div></div>';
+  } else if (w) {
+    html += '<div class="drum won"><span class="eyebrow">Penerima putaran ' + (r+1) + '</span><div class="slip">' + esc(w.name) + '</div><div class="amt">' + rp(P) + '</div>'
+      + (paidN < N ? '<span class="chip warn">Dana belum lengkap: kurang ' + rp(P-C) + '</span>' : '<span class="chip ok">Dana lengkap, siap diserahkan</span>') + '</div>'
+      + (RO ? '' : '<div class="actions"><button class="ghost" data-act="undoWin">' + (ui.armed.undoWin ? 'Yakin batalkan?' : 'Batalkan hasil kocokan') + '</button></div>');
+  } else {
+    html += '<div class="drum"><span class="eyebrow">Putaran ' + (r+1) + '</span><div class="slip">' + (notYet.length ? '?' : (N ? 'Semua sudah dapat' : 'Belum ada anggota')) + '</div>'
+      + '<div class="muted" style="font-size:13px">' + (notYet.length ? 'Diundi dari ' + notYet.length + ' anggota yang belum pernah dapat' : (N ? 'Arisan sudah selesai satu siklus' : 'Tambahkan anggota dulu')) + '</div></div>';
+    if (!RO) {
+      const unpaid = N - paidN;
+      html += '<div class="actions"><button class="gold" data-act="roll"' + (!notYet.length?' disabled':'') + '>' + (ui.armed.roll ? unpaid + ' belum transfer, tetap kocok?' : 'Kocok pemenang') + '</button>'
+        + '<select id="manualWin" aria-label="Pilih penerima manual" style="width:auto;flex:1"><option value="">Atau pilih manual…</option>'
+        + notYet.map(m => '<option value="' + esc(m.id) + '">' + esc(m.name) + '</option>').join("") + '</select></div>';
+    }
+  }
+  html += '<div><div class="eyebrow" style="margin-bottom:8px">Belum dapat</div><div class="queue">'
+    + (notYet.length ? notYet.map(m => '<span class="chip">' + esc(m.name) + '</span>').join("") : '<span class="muted">Tidak ada</span>') + '</div></div></section></div>';
+
+  const tabs = [["anggota","Anggota & checklist"],["riwayat","Riwayat"]].concat(RO ? [] : [["pengaturan","Pengaturan"]]);
+  if (RO && ui.tab === "pengaturan") ui.tab = "anggota";
+  html += '<div class="tabs" role="tablist">' + tabs.map(([k,l]) => '<button role="tab" data-act="tab" data-v="' + k + '" aria-selected="' + (ui.tab===k) + '">' + l + '</button>').join("") + '</div>';
+  if (ui.tab === "anggota") html += viewMembers(r);
+  else if (ui.tab === "riwayat") html += viewHistory();
+  else html += viewSettings();
+  html += '<footer>Putaran berjalan: ' + (S.current+1) + ' · Pot per putaran ' + rp(P) + (mode === "remote" ? ' · <a href="' + esc(location.pathname) + '" style="color:inherit">Arisan lain</a>' : '') + '</footer></div>';
+  return html;
+}
+
+function viewMembers(r){
+  let h = '<section class="panel" aria-label="Anggota"><div class="toolbar"><div class="seg" role="group" aria-label="Saring">'
+    + [["semua","Semua"],["belum","Belum transfer"],["sudah","Sudah transfer"]].map(([k,l]) => '<button data-act="filter" data-v="' + k + '" aria-pressed="' + (ui.filter===k) + '">' + l + '</button>').join("")
+    + '</div><input id="q" class="search" type="search" placeholder="Cari nama…" value="' + esc(ui.q) + '" aria-label="Cari anggota"></div>';
+  h += '<div class="list" id="list">' + listRows(r) + '</div>';
+  if (!readOnly()) {
+    h += '<form class="add" id="addForm" autocomplete="off"><label class="f full">Nama anggota<input id="m_name" required maxlength="80" placeholder="mis. Bu Yanti"></label>'
+      + '<label class="f">Nominal (Rp)<input id="m_amount" inputmode="numeric" value="' + (S.defaultAmount||"") + '"></label>'
+      + '<label class="f">No. WhatsApp (opsional)<input id="m_phone" inputmode="tel" placeholder="08…"></label>'
+      + '<button class="primary" type="submit">Tambah</button></form>';
+  }
+  return h + '</section>';
+}
+
+function listRows(r){
+  const RO = readOnly();
+  const q = ui.q.trim().toLowerCase();
+  const rows = S.members.filter(m => (!q || m.name.toLowerCase().includes(q)) && (ui.filter === "semua" || (ui.filter === "sudah") === isPaid(r, m.id)));
+  if (!S.members.length) return '<div class="empty">' + (RO ? 'Belum ada anggota.' : 'Belum ada anggota. Tambahkan nama di bawah untuk mulai.') + '</div>';
+  if (!rows.length) return '<div class="empty">Tidak ada anggota yang cocok.</div>';
+  return rows.map(m => {
+    if (ui.editing === m.id && !RO) {
+      return '<form class="edit-row" data-id="' + esc(m.id) + '" id="editForm"><label class="f full">Nama<input id="e_name" value="' + esc(m.name) + '" required maxlength="80"></label>'
+        + '<label class="f">Nominal<input id="e_amount" inputmode="numeric" value="' + esc(m.amount) + '"></label>'
+        + '<label class="f">No. WhatsApp<input id="e_phone" inputmode="tel" value="' + esc(m.phone||"") + '"></label>'
+        + '<div class="actions"><button class="primary" type="submit">Simpan</button><button type="button" data-act="cancelEdit">Batal</button></div></form>';
+    }
+    const paid = isPaid(r, m.id), wr = wonRound(m.id);
+    const sub = [paid ? '<span class="chip ok">Lunas ' + fShort(S.payments[r][m.id]) + '</span>' : '<span class="chip warn">Belum transfer</span>'];
+    if (wr >= 0) sub.push('<span class="chip gold">Dapat putaran ' + (wr+1) + '</span>');
+    if (!paid && m.phone && !RO) {
+      const txt = "Halo " + m.name + ", pengingat iuran " + (S.name||"arisan") + " putaran " + (r+1) + " sebesar " + rp(m.amount) + " ya. Terima kasih.";
+      sub.push('<a class="btn" style="padding:3px 9px;font-size:12px" target="_blank" rel="noopener" href="https://wa.me/' + esc(m.phone) + '?text=' + encodeURIComponent(txt) + '">Ingatkan via WA</a>');
+    }
+    return '<div class="row"><button class="check" role="checkbox" aria-checked="' + paid + '" aria-label="' + esc(m.name) + ' sudah transfer" data-act="toggle" data-id="' + esc(m.id) + '" data-r="' + r + '"' + (RO?' disabled':'') + '>' + icon.check + '</button>'
+      + '<div class="who"><div class="name">' + esc(m.name) + '</div><div class="sub">' + sub.join("") + '</div></div>'
+      + '<div class="amt">' + rp(m.amount) + '</div>'
+      + '<div class="ops">' + (RO ? '' : '<button class="ghost" data-act="edit" data-id="' + esc(m.id) + '" aria-label="Ubah ' + esc(m.name) + '">Ubah</button>'
+      + '<button class="ghost danger' + (ui.armed["del"+m.id]?' armed':'') + '" data-act="del" data-id="' + esc(m.id) + '">' + (ui.armed["del"+m.id] ? 'Hapus?' : 'Hapus') + '</button>') + '</div></div>';
+  }).join("");
+}
+
+function viewHistory(){
+  const R = totalRounds(), RO = readOnly();
+  let h = '<section class="panel" aria-label="Riwayat"><div class="toolbar"><h2>Riwayat pembayaran</h2><div class="legend">'
+    + '<span><span class="cell paid">✓</span> lunas</span><span><span class="cell late">!</span> belum (lewat)</span><span><span class="cell">·</span> belum</span><span><span class="cell paid win">★</span> penerima</span>'
+    + '<button data-act="csv"' + (S.members.length?'':' disabled') + '>Unduh CSV</button></div></div>';
+  if (!S.members.length) h += '<div class="empty">Belum ada anggota.</div>';
+  else {
+    h += '<div class="scroll"><table><thead><tr><th>Anggota</th>';
+    for (let i=0;i<R;i++) h += '<th class="' + (i===S.current?'cur':'') + '">P' + (i+1) + '<small>' + fDate(roundDate(i), {day:"numeric", month:"short"}) + '</small></th>';
+    h += '<th>Total</th></tr></thead><tbody>';
+    S.members.forEach(m => {
+      let tot = 0;
+      h += '<tr><td><b>' + esc(m.name) + '</b></td>';
+      for (let i=0;i<R;i++){
+        const p = isPaid(i, m.id), win = S.winners[i] === m.id; if (p) tot += Number(m.amount)||0;
+        const cls = "cell" + (p ? " paid" : (i < S.current ? " late" : "")) + (win ? " win" : "");
+        const sym = win ? "★" : (p ? "✓" : (i < S.current ? "!" : "·"));
+        h += '<td><button class="' + cls + '" data-act="toggle" data-id="' + esc(m.id) + '" data-r="' + i + '" aria-label="' + esc(m.name) + ' putaran ' + (i+1) + (p?' lunas':' belum') + '"' + (RO?' disabled':'') + '>' + sym + '</button></td>';
+      }
+      h += '<td class="num">' + rp(tot) + '</td></tr>';
+    });
+    h += '<tr><td><b>Terkumpul</b></td>';
+    let grand = 0;
+    for (let i=0;i<R;i++){ const c = collected(i); grand += c; h += '<td class="num" style="font-size:12px">' + (c ? (c/1000).toLocaleString("id-ID") + 'rb' : '–') + '</td>'; }
+    h += '<td class="num">' + rp(grand) + '</td></tr></tbody></table></div>';
+  }
+  h += '</section><section class="panel"><h2>Penerima per putaran</h2><div class="list">';
+  for (let i=0;i<R;i++){
+    const w = winnerOf(i);
+    h += '<div class="row" style="grid-template-columns:auto 1fr auto"><span class="chip ' + (w?'gold':'') + '">P' + (i+1) + '</span><div class="who"><div class="name">' + (w ? esc(w.name) : '<span class="muted">Belum dikocok</span>') + '</div><div class="sub">' + fDate(roundDate(i)) + '</div></div><div class="amt">' + (w ? rp(pot()) : '') + '</div></div>';
+  }
+  h += '</div></section><section class="panel"><h2>Catatan aktivitas</h2><div class="log">'
+    + (S.log.length ? S.log.map(l => '<div><time>' + new Date(l.t).toLocaleString("id-ID",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"}) + '</time><span>' + esc(l.m) + '</span></div>').join("") : '<span class="muted">Belum ada aktivitas.</span>')
+    + '</div></section>';
+  return h;
+}
+
+function viewSettings(){
+  let h = '<div class="two"><section class="panel"><h2>Pengaturan arisan</h2><div class="form">'
+    + '<label class="f" style="grid-column:1/-1">Nama arisan<input id="s_name" maxlength="120" value="' + esc(S.name) + '"></label>'
+    + '<label class="f">Iuran standar (Rp)<input id="s_amount" inputmode="numeric" value="' + esc(S.defaultAmount) + '"></label>'
+    + '<label class="f">Periode<select id="s_cycle">' + Object.entries(cycleLabel).map(([k,l]) => '<option value="' + k + '"' + (S.cycle===k?' selected':'') + '>' + l + '</option>').join("") + '</select></label>'
+    + '<label class="f">Tanggal kocokan pertama<input id="s_start" type="date" value="' + esc(S.startDate) + '"></label>'
+    + '<label class="f">Putaran berjalan<select id="s_current">' + Array.from({length: totalRounds()}, (_,i) => '<option value="' + i + '"' + (S.current===i?' selected':'') + '>Putaran ' + (i+1) + '</option>').join("") + '</select></label>'
+    + '</div><div class="actions"><button data-act="applyAmount">' + (ui.armed.applyAmount ? 'Yakin ubah semua?' : 'Samakan nominal semua anggota') + '</button></div></section>';
+  h += '<section class="panel"><h2>Cadangan data</h2><p class="muted" style="margin:0">Unduh atau salin data untuk disimpan. Tempel di kotak impor untuk memulihkan.</p>'
+    + '<div class="actions"><button data-act="exportJson">Unduh cadangan (.json)</button><button data-act="copyJson">Salin data</button></div>'
+    + '<label class="f">Impor data<textarea id="importBox" placeholder="Tempel data cadangan di sini"></textarea></label>'
+    + '<div class="actions"><button data-act="importJson">Impor</button>'
+    + '<button class="danger' + (ui.armed.reset?' armed':'') + '" data-act="reset">' + (ui.armed.reset ? 'Hapus semua data?' : 'Hapus semua data') + '</button></div></section>';
+  if (mode === "remote") {
+    h += '<section class="panel"><h2>Ganti PIN bendahara</h2><form id="pinForm" class="form" autocomplete="off">'
+      + '<label class="f">PIN lama<input id="p_old" type="password" inputmode="numeric" required></label>'
+      + '<label class="f">PIN baru<input id="p_new" type="password" inputmode="numeric" minlength="4" required></label>'
+      + '<div class="actions" style="grid-column:1/-1"><button type="submit">Ganti PIN</button></div></form></section>';
+  }
+  return h + '</div>';
+}
+
+/* ---------- actions ---------- */
+function mustEdit(){ if (readOnly()){ toast("Masuk sebagai bendahara untuk mengubah data"); return false; } return true; }
+function memberName(id){ const m = S.members.find(x => x.id === id); return m ? m.name : "Anggota"; }
+function setWinner(r, id){ S.winners[r] = id; commit(memberName(id) + " mendapat arisan putaran " + (r+1)); }
+function roll(){
+  const r = ui.round;
+  const used = new Set(Object.values(S.winners));
+  const cand = S.members.filter(m => !used.has(m.id));
+  if (!cand.length) return;
+  const arr = new Uint32Array(1); crypto.getRandomValues(arr);
+  const pick = cand[arr[0] % cand.length];
+  const reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  ui.rolling = true; ui.rollName = cand[0].name; render();
+  let n = 0;
+  const iv = setInterval(() => { const el = $("#rollName"); n++; if (el) el.textContent = cand[n % cand.length].name; }, 80);
+  setTimeout(() => { clearInterval(iv); ui.rolling = false; setWinner(r, pick.id); toast("🎉 " + pick.name + " dapat arisan!"); }, reduce ? 300 : 2200);
+}
+function reminderText(r){
+  const unpaid = S.members.filter(m => !isPaid(r, m.id));
+  const link = mode === "remote" ? "\n\nCek status: " + shareUrl() : "";
+  return "*" + (S.name||"Arisan") + " — Putaran " + (r+1) + "*\nKocokan: " + fDate(roundDate(r), {weekday:"long", day:"numeric", month:"long"}) + "\n\nYang belum transfer:\n"
+    + unpaid.map((m,i) => (i+1) + ". " + m.name + " (" + rp(m.amount) + ")").join("\n")
+    + "\n\nSudah transfer " + (S.members.length - unpaid.length) + " dari " + S.members.length + " orang. Mohon segera transfer ya, terima kasih." + link;
+}
+function summaryText(r){
+  const w = winnerOf(r);
+  return "*Rekap " + (S.name||"Arisan") + " — Putaran " + (r+1) + "*\n"
+    + S.members.map(m => (isPaid(r, m.id) ? "✅ " : "⬜ ") + m.name + " — " + rp(m.amount)).join("\n")
+    + "\n\nTerkumpul: " + rp(collected(r)) + " dari " + rp(pot())
+    + (w ? "\nPenerima: " + w.name : "\nPenerima: belum dikocok")
+    + (mode === "remote" ? "\n\n" + shareUrl() : "");
+}
+function csvText(){
+  const R = totalRounds(), q = v => '"' + String(v).replace(/"/g, '""') + '"';
+  const head = ["Anggota","Nominal","No WA"].concat(Array.from({length:R}, (_,i) => "P" + (i+1) + " " + roundDate(i).toISOString().slice(0,10))).concat(["Dapat putaran"]);
+  const rows = S.members.map(m => [m.name, m.amount, m.phone || ""].concat(Array.from({length:R}, (_,i) => isPaid(i, m.id) ? "lunas " + S.payments[i][m.id].slice(0,10) : "")).concat([wonRound(m.id) >= 0 ? wonRound(m.id)+1 : ""]));
+  return "﻿" + [head].concat(rows).map(r => r.map(q).join(",")).join("\n");
+}
+const slug = () => (S.name || "arisan").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+app.addEventListener("click", e => {
+  const b = e.target.closest("[data-act]"); if (!b || b.disabled) return;
+  const act = b.dataset.act, id = b.dataset.id;
+  switch(act){
+    case "reload": location.reload(); break;
+    case "tab": ui.tab = b.dataset.v; ui.editing = null; render(); break;
+    case "filter": ui.filter = b.dataset.v; render(); break;
+    case "prev": ui.round = Math.max(0, ui.round-1); render(); break;
+    case "next": ui.round = Math.min(totalRounds()-1, ui.round+1); render(); break;
+    case "share": copy(shareUrl(), "Link tersalin. Bagikan ke grup arisan."); break;
+    case "openLogin": ui.login = true; ui.loginErr = ""; render(); { const f = $("#pin"); if (f) f.focus(); } break;
+    case "closeLogin": ui.login = false; render(); break;
+    case "logout": logout(); toast("Keluar dari mode bendahara"); break;
+    case "toggle": {
+      if (!mustEdit()) return;
+      const r = +b.dataset.r, pm = paidMap(r);
+      if (pm[id]) { delete pm[id]; commit(memberName(id) + " ditandai belum transfer (Putaran " + (r+1) + ")"); }
+      else { pm[id] = new Date().toISOString(); commit(memberName(id) + " sudah transfer (Putaran " + (r+1) + ")"); }
+      break;
+    }
+    case "allPaid": {
+      if (!mustEdit() || !arm("allPaid")) return;
+      const pm = paidMap(ui.round), now = new Date().toISOString();
+      S.members.forEach(m => { if (!pm[m.id]) pm[m.id] = now; });
+      commit("Semua anggota ditandai lunas (Putaran " + (ui.round+1) + ")"); break;
+    }
+    case "advance": if (!mustEdit() || !arm("advance")) return; S.current = Math.min(totalRounds()-1, S.current+1); ui.round = S.current; commit("Putaran " + (S.current+1) + " dimulai"); break;
+    case "setCurrent": if (!mustEdit()) return; S.current = ui.round; commit("Putaran berjalan diubah ke " + (S.current+1)); break;
+    case "remind": copy(reminderText(ui.round), "Pengingat tersalin, tempel di grup WA"); break;
+    case "summary": copy(summaryText(ui.round), "Rekap tersalin"); break;
+    case "csv": download(slug() + "-riwayat.csv", csvText(), "text/csv;charset=utf-8"); break;
+    case "roll": {
+      if (!mustEdit()) return;
+      const unpaid = S.members.filter(m => !isPaid(ui.round, m.id)).length;
+      if (unpaid && !arm("roll")) return;
+      ui.armed = {}; roll(); break;
+    }
+    case "undoWin": if (!mustEdit() || !arm("undoWin")) return; { const n = memberName(S.winners[ui.round]); delete S.winners[ui.round]; commit("Hasil kocokan putaran " + (ui.round+1) + " (" + n + ") dibatalkan"); } break;
+    case "edit": ui.editing = id; render(); { const f = $("#e_name"); if (f) f.focus(); } break;
+    case "cancelEdit": ui.editing = null; render(); break;
+    case "del": {
+      if (!mustEdit() || !arm("del" + id)) return;
+      const n = memberName(id);
+      S.members = S.members.filter(m => m.id !== id);
+      for (const k in S.payments) delete S.payments[k][id];
+      for (const k in S.winners) if (S.winners[k] === id) delete S.winners[k];
+      S.current = Math.min(S.current, totalRounds()-1);
+      commit(n + " dihapus dari arisan"); break;
+    }
+    case "clearSample": S = blank({ name: "Arisan Baru" }); ui.round = 0; ui.filter = "semua"; ui.tab = "pengaturan"; commit("Arisan baru dibuat"); toast("Atur nama dan iuran, lalu tambahkan anggota"); break;
+    case "applyAmount": if (!mustEdit() || !arm("applyAmount")) return; S.members.forEach(m => m.amount = S.defaultAmount); commit("Nominal semua anggota disamakan jadi " + rp(S.defaultAmount)); break;
+    case "exportJson": download(slug() + "-cadangan.json", JSON.stringify(S, null, 2), "application/json"); break;
+    case "copyJson": copy(JSON.stringify(S), "Data cadangan tersalin"); break;
+    case "importJson": {
+      if (!mustEdit()) return;
+      try {
+        const D = JSON.parse($("#importBox").value);
+        if (!D || !Array.isArray(D.members) || typeof D.payments !== "object") throw 0;
+        S = blank(Object.assign({}, D, { sample: false })); ui.round = S.current; commit("Data diimpor"); toast("Data berhasil diimpor");
+      } catch(err){ toast("Data tidak dikenali. Gunakan file atau teks dari Cadangan data."); }
+      break;
+    }
+    case "reset": if (!mustEdit() || !arm("reset")) return; S.members = []; S.payments = {}; S.winners = {}; S.current = 0; S.sample = false; ui.round = 0; commit("Semua data dihapus"); break;
+  }
+});
+
+app.addEventListener("submit", async e => {
+  e.preventDefault();
+  const f = e.target;
+  if (f.id === "createForm") {
+    const name = $("#c_name").value.trim(), p1 = $("#c_pin").value, p2 = $("#c_pin2").value;
+    if (p1.length < 4) { ui.createErr = ERR.pin_too_short; render(); return; }
+    if (p1 !== p2) { ui.createErr = "PIN dan ulangan PIN tidak sama."; render(); return; }
+    const data = blank({ name, defaultAmount: digits($("#c_amount").value) || 200000, cycle: $("#c_cycle").value, startDate: $("#c_start").value || new Date().toISOString().slice(0,10), log: [{t: Date.now(), m: "Arisan dibuat"}] });
+    ui.busy = true; ui.createErr = ""; render();
+    try {
+      const res = await rpc("create_arisan", { p_name: name, p_pin: p1, p_data: data });
+      if (!res || !res.ok) throw new Error(ERR[res && res.error] || "Gagal membuat arisan.");
+      lsSet(PIN_KEY(res.id), p1); rememberRecent(res.id, name);
+      location.search = "?g=" + res.id;
+    } catch(err) { ui.busy = false; ui.createErr = err.message || "Gagal membuat arisan."; render(); }
+    return;
+  }
+  if (f.id === "loginForm") { const p = $("#pin").value; if (p) tryLogin(p, false); return; }
+  if (f.id === "pinForm") {
+    try {
+      const res = await rpc("change_pin", { p_id: GID, p_old: $("#p_old").value, p_new: $("#p_new").value });
+      if (res && res.ok) { pin = $("#p_new").value; lsSet(PIN_KEY(GID), pin); f.reset(); toast("PIN berhasil diganti"); }
+      else toast(ERR[res && res.error] || "Gagal mengganti PIN.");
+    } catch(err){ toast("Gagal tersambung."); }
+    return;
+  }
+  if (!mustEdit()) return;
+  if (f.id === "addForm") {
+    const name = $("#m_name").value.trim(); if (!name) return;
+    S.members.push({ id: uid(), name, amount: digits($("#m_amount").value) || S.defaultAmount, phone: normPhone($("#m_phone").value) });
+    commit(name + " bergabung"); const n = $("#m_name"); if (n) n.focus();
+  } else if (f.id === "editForm") {
+    const m = S.members.find(x => x.id === f.dataset.id); if (!m) return;
+    m.name = $("#e_name").value.trim() || m.name;
+    m.amount = digits($("#e_amount").value) || m.amount;
+    m.phone = normPhone($("#e_phone").value);
+    ui.editing = null; commit("Data " + m.name + " diperbarui");
+  }
+});
+
+app.addEventListener("input", e => {
+  if (e.target.id === "q") { ui.q = e.target.value; const l = $("#list"); if (l) l.innerHTML = listRows(ui.round); }
+});
+app.addEventListener("change", e => {
+  const t = e.target;
+  if (t.id === "manualWin" && t.value) { if (!mustEdit()) return; setWinner(ui.round, t.value); return; }
+  if (!t.id || !t.id.startsWith("s_") || !mustEdit()) return;
+  if (t.id === "s_name") { S.name = t.value.trim() || "Arisan"; document.title = S.name + " · Buku Arisan"; commit("Nama arisan diubah"); }
+  if (t.id === "s_amount") { S.defaultAmount = digits(t.value) || S.defaultAmount; commit("Iuran standar jadi " + rp(S.defaultAmount)); }
+  if (t.id === "s_cycle") { S.cycle = t.value; commit("Periode jadi " + cycleLabel[S.cycle]); }
+  if (t.id === "s_start") { if (t.value) { S.startDate = t.value; commit("Tanggal kocokan pertama diubah"); } }
+  if (t.id === "s_current") { S.current = +t.value; ui.round = S.current; commit("Putaran berjalan diubah ke " + (S.current+1)); }
+});
+window.addEventListener("beforeunload", e => { if (mode === "remote" && (dirty || saveTimer || saving)) { e.preventDefault(); e.returnValue = ""; } });
+
+boot();
+})();
