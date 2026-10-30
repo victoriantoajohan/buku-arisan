@@ -17,8 +17,16 @@ const DEMO_KEY = "buku-arisan-demo-v1";
 const PIN_KEY = id => "buku-arisan-pin-" + id;
 const RECENT_KEY = "buku-arisan-recent";
 
-const blank = (o) => Object.assign({ v:1, sample:false, name:"Arisan", defaultAmount:200000, cycle:"bulanan",
-  startDate:new Date().toISOString().slice(0,10), current:0, members:[], payments:{}, winners:{}, log:[] }, o || {});
+const blank = (o) => {
+  const d = Object.assign({ v:1, sample:false, name:"Arisan", defaultAmount:200000, cycle:"bulanan", winnersPerRound:1,
+    startDate:new Date().toISOString().slice(0,10), current:0, members:[], payments:{}, winners:{}, log:[] }, o || {});
+  // kompatibel dengan data lama: winners[r] dulu berupa string, sekarang array id
+  const w = {};
+  for (const k in (d.winners || {})) { const v = d.winners[k]; const arr = Array.isArray(v) ? v.filter(Boolean) : (v ? [v] : []); if (arr.length) w[k] = arr; }
+  d.winners = w;
+  d.winnersPerRound = Math.min(10, Math.max(1, parseInt(d.winnersPerRound, 10) || 1));
+  return d;
+};
 
 const SAMPLE = {"v":1,"sample":true,"name":"Arisan Keluarga Besar","defaultAmount":200000,"cycle":"bulanan","startDate":"2026-09-01","current":2,"members":[{"id":"m1","name":"Bu Ratna","amount":200000,"phone":"6281234500001"},{"id":"m2","name":"Pak Hendra","amount":200000,"phone":"6281234500002"},{"id":"m3","name":"Siti Aminah","amount":200000,"phone":""},{"id":"m4","name":"Dewi Lestari","amount":200000,"phone":"6281234500004"},{"id":"m5","name":"Mas Bayu","amount":200000,"phone":""},{"id":"m6","name":"Tante Lina","amount":400000,"phone":"6281234500006"},{"id":"m7","name":"Om Agus","amount":200000,"phone":""},{"id":"m8","name":"Rina Wulandari","amount":200000,"phone":"6281234500008"}],"payments":{"0":{"m1":"2026-08-29T09:10:00Z","m2":"2026-08-30T03:00:00Z","m3":"2026-08-30T05:00:00Z","m4":"2026-08-31T02:00:00Z","m5":"2026-08-31T08:00:00Z","m6":"2026-08-28T07:00:00Z","m7":"2026-09-01T01:00:00Z","m8":"2026-08-30T10:00:00Z"},"1":{"m1":"2026-09-28T09:10:00Z","m2":"2026-09-29T03:00:00Z","m3":"2026-09-30T05:00:00Z","m4":"2026-09-30T02:00:00Z","m5":"2026-10-02T08:00:00Z","m6":"2026-09-27T07:00:00Z","m7":"2026-09-30T01:00:00Z","m8":"2026-09-29T10:00:00Z"},"2":{"m1":"2026-10-27T09:10:00Z","m4":"2026-10-28T02:00:00Z","m6":"2026-10-26T07:00:00Z","m8":"2026-10-29T10:00:00Z","m2":"2026-10-29T12:00:00Z"}},"winners":{"0":"m4","1":"m7"},"log":[]};
 
@@ -33,13 +41,15 @@ let saveTimer = null, saving = false, dirty = false;
 let channel = null;
 let loadError = "";
 
-const ui = { round: 0, tab: "anggota", filter: "semua", q: "", editing: null, armed: {}, rolling: false, rollName: "", login: false, loginErr: "", createErr: "", busy: false };
+const ui = { rollCount: 1, round: 0, tab: "anggota", filter: "semua", q: "", editing: null, armed: {}, rolling: false, rollName: "", login: false, loginErr: "", createErr: "", busy: false };
 
 /* ---------- helpers ---------- */
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const rp = n => "Rp " + Math.round(Number(n)||0).toLocaleString("id-ID");
 const uid = () => "m" + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
-const totalRounds = () => Math.max(1, S.members.length);
+const K = () => Math.min(10, Math.max(1, parseInt(S.winnersPerRound, 10) || 1));
+const totalRounds = () => Math.max(1, Math.ceil(S.members.length / K()));
+const slots = r => Math.max(1, Math.min(K(), S.members.length - K() * r));
 const roundDate = i => {
   const d = new Date((S.startDate || "2026-01-01") + "T00:00:00");
   if (S.cycle === "mingguan") d.setDate(d.getDate() + 7*i);
@@ -51,9 +61,14 @@ const fDate = (d, o) => d.toLocaleDateString("id-ID", o || {day:"numeric", month
 const fShort = iso => fDate(new Date(iso), {day:"numeric", month:"short"});
 const paidMap = r => (S.payments[r] = S.payments[r] || {});
 const isPaid = (r, id) => !!(S.payments[r] && S.payments[r][id]);
-const winnerOf = r => S.winners[r] ? S.members.find(m => m.id === S.winners[r]) : null;
-const wonRound = id => { for (const k in S.winners) if (S.winners[k] === id) return +k; return -1; };
+const winIds = r => (S.winners[r] || []).filter(id => S.members.some(m => m.id === id));
+const winnersOf = r => winIds(r).map(id => S.members.find(m => m.id === id));
+const wonRound = id => { for (const k in S.winners) if ((S.winners[k] || []).includes(id)) return +k; return -1; };
+const allWinnerIds = () => { const s = new Set(); for (const k in S.winners) (S.winners[k] || []).forEach(id => s.add(id)); return s; };
+const setRound = (r, ids) => { if (ids.length) S.winners[r] = ids; else delete S.winners[r]; };
 const pot = () => S.members.reduce((a, m) => a + (Number(m.amount)||0), 0);
+const payout = r => pot() / slots(r);
+const names = ms => ms.length <= 1 ? (ms[0] ? ms[0].name : "") : ms.slice(0, -1).map(m => m.name).join(", ") + " & " + ms[ms.length-1].name;
 const collected = r => S.members.reduce((a, m) => a + (isPaid(r, m.id) ? Number(m.amount)||0 : 0), 0);
 const cycleLabel = {bulanan:"Bulanan", "2mingguan":"Dua mingguan", mingguan:"Mingguan"};
 const normPhone = p => { let d = String(p||"").replace(/\D/g, ""); if (d.startsWith("0")) d = "62" + d.slice(1); return d; };
@@ -226,7 +241,7 @@ function viewLanding(){
     + '<label class="f">Iuran per orang (Rp)<input id="c_amount" inputmode="numeric" value="200000"></label>'
     + '<label class="f">Periode<select id="c_cycle">' + Object.entries(cycleLabel).map(([k,l]) => '<option value="' + k + '">' + l + '</option>').join("") + '</select></label>'
     + '<label class="f">Tanggal kocokan pertama<input id="c_start" type="date" value="' + today + '"></label>'
-    + '<span></span>'
+    + '<label class="f">Pemenang per putaran<select id="c_k">' + [1,2,3,4,5].map(k => '<option value="' + k + '">' + k + ' orang</option>').join("") + '</select></label>'
     + '<label class="f">PIN bendahara<input id="c_pin" type="password" inputmode="numeric" minlength="4" required placeholder="minimal 4 angka"></label>'
     + '<label class="f">Ulangi PIN<input id="c_pin2" type="password" inputmode="numeric" minlength="4" required></label>'
     + (ui.createErr ? '<div class="err" style="grid-column:1/-1">' + esc(ui.createErr) + '</div>' : '')
@@ -242,15 +257,15 @@ function viewApp(){
   const N = S.members.length, P = pot(), C = collected(r);
   const paidN = S.members.filter(m => isPaid(r, m.id)).length;
   const pct = P ? Math.round(C / P * 100) : 0;
-  const w = winnerOf(r);
-  const winnersSet = new Set(Object.values(S.winners));
+  const ws = winnersOf(r), need = slots(r) - ws.length;
+  const winnersSet = allWinnerIds();
   const notYet = S.members.filter(m => !winnersSet.has(m.id));
   const isCur = r === S.current;
   const dis = RO ? ' disabled' : '';
 
   let html = '<div class="wrap">';
   html += '<header class="top"><div><div class="eyebrow">Buku Arisan</div><h1>' + esc(S.name || "Arisan") + '</h1>'
-    + '<div class="meta"><span>' + esc(cycleLabel[S.cycle] || "Bulanan") + '</span><span class="num">' + rp(S.defaultAmount) + ' / orang</span><span>' + N + ' anggota</span><span>Mulai ' + fDate(roundDate(0)) + '</span></div></div>'
+    + '<div class="meta"><span>' + esc(cycleLabel[S.cycle] || "Bulanan") + '</span><span class="num">' + rp(S.defaultAmount) + ' / orang</span><span>' + N + ' anggota</span>' + (K() > 1 ? '<span>' + K() + ' pemenang / putaran</span>' : '') + '<span>Mulai ' + fDate(roundDate(0)) + '</span></div></div>'
     + '<div class="hdr-actions"><span id="status">' + statusChip() + '</span>';
   if (mode === "remote") {
     html += '<button data-act="share">Salin link grup</button>';
@@ -272,7 +287,7 @@ function viewApp(){
     + '<div class="r"><button class="ghost" data-act="prev" aria-label="Putaran sebelumnya"' + (r<=0?' disabled':'') + '>‹ Sebelumnya</button>'
     + '<button class="ghost" data-act="next" aria-label="Putaran berikutnya"' + (r>=totalRounds()-1?' disabled':'') + '>Berikutnya ›</button></div></div>';
   html += '<div class="pot"><span class="eyebrow">Terkumpul</span><div class="big">' + rp(C) + '</div>'
-    + '<div class="muted">dari <span class="num">' + rp(P) + '</span> · ' + pct + '%</div>'
+    + '<div class="muted">dari <span class="num">' + rp(P) + '</span> · ' + pct + '%' + (slots(r) > 1 ? ' · dibagi ' + slots(r) + ' pemenang, <span class="num">' + rp(payout(r)) + '</span>/orang' : '') + '</div>'
     + '<div class="bar" role="progressbar" aria-valuenow="' + pct + '" aria-valuemin="0" aria-valuemax="100"><i style="width:' + pct + '%"></i></div></div>';
   html += '<div class="stats"><div class="stat"><b>' + paidN + '/' + N + '</b><span>Sudah transfer</span></div>'
     + '<div class="stat"><b>' + (N - paidN) + '</b><span>Belum transfer</span></div>'
@@ -286,18 +301,32 @@ function viewApp(){
     + '</div><textarea id="copyFallback" hidden aria-label="Teks untuk disalin"></textarea></section>';
 
   html += '<section class="panel" aria-label="Kocokan"><div class="toolbar"><h2>Kocokan</h2><span class="chip gold">' + notYet.length + ' belum dapat</span></div>';
+  const fundChip = paidN < N ? '<span class="chip warn">Dana belum lengkap: kurang ' + rp(P-C) + '</span>' : '<span class="chip ok">Dana lengkap, siap diserahkan</span>';
   if (ui.rolling) {
-    html += '<div class="drum"><span class="eyebrow">Mengocok…</span><div class="slip rolling" id="rollName">' + esc(ui.rollName) + '</div></div>';
-  } else if (w) {
-    html += '<div class="drum won"><span class="eyebrow">Penerima putaran ' + (r+1) + '</span><div class="slip">' + esc(w.name) + '</div><div class="amt">' + rp(P) + '</div>'
-      + (paidN < N ? '<span class="chip warn">Dana belum lengkap: kurang ' + rp(P-C) + '</span>' : '<span class="chip ok">Dana lengkap, siap diserahkan</span>') + '</div>'
-      + (RO ? '' : '<div class="actions"><button class="ghost" data-act="undoWin">' + (ui.armed.undoWin ? 'Yakin batalkan?' : 'Batalkan hasil kocokan') + '</button></div>');
+    html += '<div class="drum"><span class="eyebrow">Mengocok ' + ui.rollCount + ' pemenang…</span><div class="slip rolling" id="rollName">' + esc(ui.rollName) + '</div></div>';
+  } else if (ws.length) {
+    html += '<div class="drum won"><span class="eyebrow">Penerima putaran ' + (r+1) + (slots(r) > 1 ? ' · ' + ws.length + ' dari ' + slots(r) : '') + '</span>'
+      + '<div class="slip">' + ws.map(m => esc(m.name)).join('<br>') + '</div><div class="amt">' + rp(payout(r)) + (slots(r) > 1 ? ' per orang' : '') + '</div>' + fundChip + '</div>';
   } else {
-    html += '<div class="drum"><span class="eyebrow">Putaran ' + (r+1) + '</span><div class="slip">' + (notYet.length ? '?' : (N ? 'Semua sudah dapat' : 'Belum ada anggota')) + '</div>'
-      + '<div class="muted" style="font-size:13px">' + (notYet.length ? 'Diundi dari ' + notYet.length + ' anggota yang belum pernah dapat' : (N ? 'Arisan sudah selesai satu siklus' : 'Tambahkan anggota dulu')) + '</div></div>';
-    if (!RO) {
-      const unpaid = N - paidN;
-      html += '<div class="actions"><button class="gold" data-act="roll"' + (!notYet.length?' disabled':'') + '>' + (ui.armed.roll ? unpaid + ' belum transfer, tetap kocok?' : 'Kocok pemenang') + '</button>'
+    html += '<div class="drum"><span class="eyebrow">Putaran ' + (r+1) + ' · ' + slots(r) + ' pemenang</span><div class="slip">' + (notYet.length ? '?' : (N ? 'Semua sudah dapat' : 'Belum ada anggota')) + '</div>'
+      + '<div class="muted" style="font-size:13px">' + (notYet.length ? 'Diundi dari ' + notYet.length + ' anggota yang belum pernah dapat' + (slots(r) > 1 ? ', masing-masing dapat ' + rp(payout(r)) : '') : (N ? 'Arisan sudah selesai satu siklus' : 'Tambahkan anggota dulu')) + '</div></div>';
+  }
+  if (!RO && !ui.rolling) {
+    if (ws.length) {
+      html += '<div class="list">' + ws.map((m, i) => {
+        const others = [];
+        for (const k in S.winners) if (+k !== r) (S.winners[k] || []).forEach(id => { const o = S.members.find(x => x.id === id); if (o) others.push([o, +k]); });
+        others.sort((a, b) => a[1] - b[1]);
+        return '<div class="row" style="grid-template-columns:1fr auto"><div class="who"><div class="name">' + esc(m.name) + '</div><div class="sub">' + rp(payout(r)) + '</div></div>'
+          + '<div class="ops"><select class="repSel" data-id="' + esc(m.id) + '" aria-label="Ganti ' + esc(m.name) + '" style="width:auto;max-width:190px"><option value="">Ganti…</option>'
+          + (notYet.length ? '<optgroup label="Ganti dengan yang belum dapat">' + notYet.map(n => '<option value="n:' + esc(n.id) + '">' + esc(n.name) + '</option>').join("") + '</optgroup>' : '')
+          + (others.length ? '<optgroup label="Tukar giliran dengan">' + others.map(([o, k]) => '<option value="s:' + esc(o.id) + ':' + k + '">' + esc(o.name) + ' (P' + (k+1) + ')</option>').join("") + '</optgroup>' : '')
+          + '</select><button class="ghost danger' + (ui.armed["rm"+m.id]?' armed':'') + '" data-act="rmWin" data-id="' + esc(m.id) + '">' + (ui.armed["rm"+m.id] ? 'Hapus?' : 'Hapus') + '</button></div></div>';
+      }).join("") + '</div>';
+    }
+    if (need > 0 && notYet.length) {
+      const unpaid = N - paidN, n = Math.min(need, notYet.length);
+      html += '<div class="actions"><button class="gold" data-act="roll">' + (ui.armed.roll ? unpaid + ' belum transfer, tetap kocok?' : (ws.length ? 'Kocok ' + n + ' pemenang lagi' : 'Kocok ' + (n > 1 ? n + ' pemenang' : 'pemenang'))) + '</button>'
         + '<select id="manualWin" aria-label="Pilih penerima manual" style="width:auto;flex:1"><option value="">Atau pilih manual…</option>'
         + notYet.map(m => '<option value="' + esc(m.id) + '">' + esc(m.name) + '</option>').join("") + '</select></div>';
     }
@@ -371,7 +400,7 @@ function viewHistory(){
       let tot = 0;
       h += '<tr><td><b>' + esc(m.name) + '</b></td>';
       for (let i=0;i<R;i++){
-        const p = isPaid(i, m.id), win = S.winners[i] === m.id; if (p) tot += Number(m.amount)||0;
+        const p = isPaid(i, m.id), win = winIds(i).includes(m.id); if (p) tot += Number(m.amount)||0;
         const cls = "cell" + (p ? " paid" : (i < S.current ? " late" : "")) + (win ? " win" : "");
         const sym = win ? "★" : (p ? "✓" : (i < S.current ? "!" : "·"));
         h += '<td><button class="' + cls + '" data-act="toggle" data-id="' + esc(m.id) + '" data-r="' + i + '" aria-label="' + esc(m.name) + ' putaran ' + (i+1) + (p?' lunas':' belum') + '"' + (RO?' disabled':'') + '>' + sym + '</button></td>';
@@ -385,8 +414,8 @@ function viewHistory(){
   }
   h += '</section><section class="panel"><h2>Penerima per putaran</h2><div class="list">';
   for (let i=0;i<R;i++){
-    const w = winnerOf(i);
-    h += '<div class="row" style="grid-template-columns:auto 1fr auto"><span class="chip ' + (w?'gold':'') + '">P' + (i+1) + '</span><div class="who"><div class="name">' + (w ? esc(w.name) : '<span class="muted">Belum dikocok</span>') + '</div><div class="sub">' + fDate(roundDate(i)) + '</div></div><div class="amt">' + (w ? rp(pot()) : '') + '</div></div>';
+    const w = winnersOf(i);
+    h += '<div class="row" style="grid-template-columns:auto 1fr auto"><span class="chip ' + (w.length?'gold':'') + '">P' + (i+1) + '</span><div class="who"><div class="name">' + (w.length ? esc(names(w)) : '<span class="muted">Belum dikocok</span>') + (w.length && w.length < slots(i) ? ' <span class="chip warn">' + (slots(i) - w.length) + ' slot kosong</span>' : '') + '</div><div class="sub">' + fDate(roundDate(i)) + '</div></div><div class="amt">' + rp(payout(i)) + (slots(i) > 1 ? '<div class="muted" style="font-size:12px">per orang</div>' : '') + '</div></div>';
   }
   h += '</div></section><section class="panel"><h2>Catatan aktivitas</h2><div class="log">'
     + (S.log.length ? S.log.map(l => '<div><time>' + new Date(l.t).toLocaleString("id-ID",{day:"numeric",month:"short",hour:"2-digit",minute:"2-digit"}) + '</time><span>' + esc(l.m) + '</span></div>').join("") : '<span class="muted">Belum ada aktivitas.</span>')
@@ -400,8 +429,9 @@ function viewSettings(){
     + '<label class="f">Iuran standar (Rp)<input id="s_amount" inputmode="numeric" value="' + esc(S.defaultAmount) + '"></label>'
     + '<label class="f">Periode<select id="s_cycle">' + Object.entries(cycleLabel).map(([k,l]) => '<option value="' + k + '"' + (S.cycle===k?' selected':'') + '>' + l + '</option>').join("") + '</select></label>'
     + '<label class="f">Tanggal kocokan pertama<input id="s_start" type="date" value="' + esc(S.startDate) + '"></label>'
+    + '<label class="f">Pemenang per putaran<select id="s_k">' + [1,2,3,4,5].map(k => '<option value="' + k + '"' + (K()===k?' selected':'') + '>' + k + ' orang</option>').join("") + '</select></label>'
     + '<label class="f">Putaran berjalan<select id="s_current">' + Array.from({length: totalRounds()}, (_,i) => '<option value="' + i + '"' + (S.current===i?' selected':'') + '>Putaran ' + (i+1) + '</option>').join("") + '</select></label>'
-    + '</div><div class="actions"><button data-act="applyAmount">' + (ui.armed.applyAmount ? 'Yakin ubah semua?' : 'Samakan nominal semua anggota') + '</button></div></section>';
+    + '</div>' + kInfo() + '<div class="actions"><button data-act="applyAmount">' + (ui.armed.applyAmount ? 'Yakin ubah semua?' : 'Samakan nominal semua anggota') + '</button></div></section>';
   h += '<section class="panel"><h2>Cadangan data</h2><p class="muted" style="margin:0">Unduh atau salin data untuk disimpan. Tempel di kotak impor untuk memulihkan.</p>'
     + '<div class="actions"><button data-act="exportJson">Unduh cadangan (.json)</button><button data-act="copyJson">Salin data</button></div>'
     + '<label class="f">Impor data<textarea id="importBox" placeholder="Tempel data cadangan di sini"></textarea></label>'
@@ -419,19 +449,26 @@ function viewSettings(){
 /* ---------- actions ---------- */
 function mustEdit(){ if (readOnly()){ toast("Masuk sebagai bendahara untuk mengubah data"); return false; } return true; }
 function memberName(id){ const m = S.members.find(x => x.id === id); return m ? m.name : "Anggota"; }
-function setWinner(r, id){ S.winners[r] = id; commit(memberName(id) + " mendapat arisan putaran " + (r+1)); }
+function addWinners(r, ids){ setRound(r, winIds(r).concat(ids)); commit(names(ids.map(id => S.members.find(m => m.id === id))) + " mendapat arisan putaran " + (r+1)); }
+function kInfo(){
+  const N = S.members.length, k = K(); if (!N) return '';
+  const R = totalRounds(), rest = N % k;
+  return '<p class="muted" style="margin:0;font-size:13.5px">' + N + ' anggota ÷ ' + k + ' pemenang = <b>' + R + ' putaran</b>. Tiap pemenang menerima <b class="num">' + rp(pot() / k) + '</b>'
+    + (rest ? '. <span style="color:var(--warn)">Putaran terakhir hanya ' + rest + ' pemenang dan menerima ' + rp(pot() / rest) + ' per orang; tambah atau kurangi anggota supaya pas.</span>' : '.') + '</p>';
+}
 function roll(){
   const r = ui.round;
-  const used = new Set(Object.values(S.winners));
+  const used = allWinnerIds();
   const cand = S.members.filter(m => !used.has(m.id));
-  if (!cand.length) return;
-  const arr = new Uint32Array(1); crypto.getRandomValues(arr);
-  const pick = cand[arr[0] % cand.length];
+  const n = Math.min(slots(r) - winIds(r).length, cand.length);
+  if (n <= 0) return;
+  const pool = cand.slice(), picks = [];
+  for (let i = 0; i < n; i++) { const a = new Uint32Array(1); crypto.getRandomValues(a); picks.push(pool.splice(a[0] % pool.length, 1)[0]); }
   const reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
-  ui.rolling = true; ui.rollName = cand[0].name; render();
-  let n = 0;
-  const iv = setInterval(() => { const el = $("#rollName"); n++; if (el) el.textContent = cand[n % cand.length].name; }, 80);
-  setTimeout(() => { clearInterval(iv); ui.rolling = false; setWinner(r, pick.id); toast("🎉 " + pick.name + " dapat arisan!"); }, reduce ? 300 : 2200);
+  ui.rolling = true; ui.rollCount = n; ui.rollName = cand[0].name; render();
+  let t = 0;
+  const iv = setInterval(() => { const el = $("#rollName"); t++; if (el) el.textContent = cand[t % cand.length].name; }, 80);
+  setTimeout(() => { clearInterval(iv); ui.rolling = false; addWinners(r, picks.map(m => m.id)); toast("🎉 " + names(picks) + " dapat arisan!"); }, reduce ? 300 : 2200);
 }
 function reminderText(r){
   const unpaid = S.members.filter(m => !isPaid(r, m.id));
@@ -441,11 +478,11 @@ function reminderText(r){
     + "\n\nSudah transfer " + (S.members.length - unpaid.length) + " dari " + S.members.length + " orang. Mohon segera transfer ya, terima kasih." + link;
 }
 function summaryText(r){
-  const w = winnerOf(r);
+  const w = winnersOf(r);
   return "*Rekap " + (S.name||"Arisan") + " — Putaran " + (r+1) + "*\n"
     + S.members.map(m => (isPaid(r, m.id) ? "✅ " : "⬜ ") + m.name + " — " + rp(m.amount)).join("\n")
     + "\n\nTerkumpul: " + rp(collected(r)) + " dari " + rp(pot())
-    + (w ? "\nPenerima: " + w.name : "\nPenerima: belum dikocok")
+    + (w.length ? "\nPenerima: " + names(w) + " (" + rp(payout(r)) + (w.length > 1 ? " per orang" : "") + ")" : "\nPenerima: belum dikocok")
     + (mode === "remote" ? "\n\n" + shareUrl() : "");
 }
 function csvText(){
@@ -493,7 +530,7 @@ app.addEventListener("click", e => {
       if (unpaid && !arm("roll")) return;
       ui.armed = {}; roll(); break;
     }
-    case "undoWin": if (!mustEdit() || !arm("undoWin")) return; { const n = memberName(S.winners[ui.round]); delete S.winners[ui.round]; commit("Hasil kocokan putaran " + (ui.round+1) + " (" + n + ") dibatalkan"); } break;
+    case "rmWin": if (!mustEdit() || !arm("rm" + id)) return; setRound(ui.round, winIds(ui.round).filter(x => x !== id)); commit(memberName(id) + " dihapus dari penerima putaran " + (ui.round+1)); break;
     case "edit": ui.editing = id; render(); { const f = $("#e_name"); if (f) f.focus(); } break;
     case "cancelEdit": ui.editing = null; render(); break;
     case "del": {
@@ -501,7 +538,7 @@ app.addEventListener("click", e => {
       const n = memberName(id);
       S.members = S.members.filter(m => m.id !== id);
       for (const k in S.payments) delete S.payments[k][id];
-      for (const k in S.winners) if (S.winners[k] === id) delete S.winners[k];
+      for (const k in S.winners) setRound(k, (S.winners[k] || []).filter(x => x !== id));
       S.current = Math.min(S.current, totalRounds()-1);
       commit(n + " dihapus dari arisan"); break;
     }
@@ -529,7 +566,7 @@ app.addEventListener("submit", async e => {
     const name = $("#c_name").value.trim(), p1 = $("#c_pin").value, p2 = $("#c_pin2").value;
     if (p1.length < 4) { ui.createErr = ERR.pin_too_short; render(); return; }
     if (p1 !== p2) { ui.createErr = "PIN dan ulangan PIN tidak sama."; render(); return; }
-    const data = blank({ name, defaultAmount: digits($("#c_amount").value) || 200000, cycle: $("#c_cycle").value, startDate: $("#c_start").value || new Date().toISOString().slice(0,10), log: [{t: Date.now(), m: "Arisan dibuat"}] });
+    const data = blank({ name, defaultAmount: digits($("#c_amount").value) || 200000, cycle: $("#c_cycle").value, winnersPerRound: +$("#c_k").value || 1, startDate: $("#c_start").value || new Date().toISOString().slice(0,10), log: [{t: Date.now(), m: "Arisan dibuat"}] });
     ui.busy = true; ui.createErr = ""; render();
     try {
       const res = await rpc("create_arisan", { p_name: name, p_pin: p1, p_data: data });
@@ -567,12 +604,28 @@ app.addEventListener("input", e => {
 });
 app.addEventListener("change", e => {
   const t = e.target;
-  if (t.id === "manualWin" && t.value) { if (!mustEdit()) return; setWinner(ui.round, t.value); return; }
+  if (t.id === "manualWin" && t.value) { if (!mustEdit()) return; addWinners(ui.round, [t.value]); return; }
+  if (t.classList.contains("repSel") && t.value) {
+    if (!mustEdit()) return;
+    const r = ui.round, oldId = t.dataset.id, [kind, newId, other] = t.value.split(":");
+    if (kind === "n") {
+      setRound(r, winIds(r).map(x => x === oldId ? newId : x));
+      commit(memberName(oldId) + " diganti " + memberName(newId) + " (Putaran " + (r+1) + ")");
+    } else if (kind === "s") {
+      const k = +other;
+      setRound(r, winIds(r).map(x => x === oldId ? newId : x));
+      setRound(k, winIds(k).map(x => x === newId ? oldId : x));
+      commit(memberName(oldId) + " tukar giliran dengan " + memberName(newId) + " (P" + (r+1) + " ↔ P" + (k+1) + ")");
+    }
+    return;
+  }
+  if (t.id === "c_k") return;
   if (!t.id || !t.id.startsWith("s_") || !mustEdit()) return;
   if (t.id === "s_name") { S.name = t.value.trim() || "Arisan"; document.title = S.name + " · Buku Arisan"; commit("Nama arisan diubah"); }
   if (t.id === "s_amount") { S.defaultAmount = digits(t.value) || S.defaultAmount; commit("Iuran standar jadi " + rp(S.defaultAmount)); }
   if (t.id === "s_cycle") { S.cycle = t.value; commit("Periode jadi " + cycleLabel[S.cycle]); }
   if (t.id === "s_start") { if (t.value) { S.startDate = t.value; commit("Tanggal kocokan pertama diubah"); } }
+  if (t.id === "s_k") { S.winnersPerRound = +t.value; S.current = Math.min(S.current, totalRounds()-1); ui.round = Math.min(ui.round, totalRounds()-1); commit("Pemenang per putaran jadi " + K() + " orang"); }
   if (t.id === "s_current") { S.current = +t.value; ui.round = S.current; commit("Putaran berjalan diubah ke " + (S.current+1)); }
 });
 window.addEventListener("beforeunload", e => { if (mode === "remote" && (dirty || saveTimer || saving)) { e.preventDefault(); e.returnValue = ""; } });
