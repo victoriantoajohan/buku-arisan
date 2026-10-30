@@ -76,6 +76,10 @@ Gambar QR disimpan di kolom terpisah (`pay_qr`) dan hanya diunduh ulang bila ber
 
 Di panel **Kocokan**, setiap pemenang punya tombol **Tandai sudah ditransfer** dan **Upload bukti** (khusus bendahara). Mengunggah bukti otomatis menandai pemenang itu sudah ditransfer. Semua anggota melihat status "Sudah ditransfer" dan tombol **Lihat bukti** untuk membuka gambarnya; riwayatnya juga tampil di tab Riwayat. Gambar bukti disimpan di tabel `arisan_proof` (migrasi `003_payout_proof.sql`).
 
+## Laporan
+
+Tab **Laporan** (terlihat semua anggota) berisi ringkasan kas (iuran masuk, sudah ditransfer ke pemenang, saldo di bendahara, tunggakan) dan tabel per anggota: total setor, tunggakan, sisa kewajiban, giliran, dan uang yang sudah diterima. Klik nama untuk rincian per putaran dan **Salin laporan** pribadi untuk dikirim lewat WhatsApp. Tersedia juga ekspor CSV.
+
 ## Catatan
 
 - **Realtime**: broadcast publik aktif secara default. Kalau di *Realtime → Settings* kamu mengaktifkan "private channels only", matikan opsi itu. Tanpa realtime pun data tetap tersinkron lewat polling setiap 20 detik.
@@ -89,4 +93,4 @@ Di panel **Kocokan**, setiap pemenang punya tombol **Tandai sudah ditransfer** d
   ```
 - **Spam pembuatan arisan**: `create_arisan` bisa dipanggil siapa saja yang tahu URL Supabase-mu. Untuk pemakaian pribadi atau keluarga ini cukup. Kalau situsnya publik, batasi dengan Supabase Auth atau hapus grant `create_arisan` dari `anon` setelah arisanmu dibuat.
 - **Cadangan**: tab *Pengaturan → Unduh cadangan (.json)*, dan tab *Riwayat → Unduh CSV* untuk dibuka di Excel/Sheets.
-- **Free tier Supabase**: project akan di-pause setelah 7 hari tanpa aktivitas. Buka situsnya sesekali, atau klik *Restore* di dashboard bila ter-pause.
+- **Free tier Supabase**: project di-pause setelah 7 hari tanpa aktivitas. Workflow `.github/workflows/keepalive.yml` melakukan ping setiap 3 hari dan sesekali membuat commit kecil agar jadwalnya tidak dinonaktifkan GitHub. Pantau di tab **Actions**; bila ping gagal, GitHub mengirim email dan kamu bisa klik *Restore* di dashboard Supabase.

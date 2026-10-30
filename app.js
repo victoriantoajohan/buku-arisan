@@ -349,11 +349,12 @@ function viewApp(){
     + (notYet.length ? notYet.map(m => '<span class="chip">' + esc(m.name) + '</span>').join("") : '<span class="muted">Tidak ada</span>') + '</div></div></section></div>';
 
   html += viewPay(r);
-  const tabs = [["anggota","Anggota & checklist"],["riwayat","Riwayat"]].concat(RO ? [] : [["pengaturan","Pengaturan"]]);
+  const tabs = [["anggota","Anggota & checklist"],["riwayat","Riwayat"],["laporan","Laporan"]].concat(RO ? [] : [["pengaturan","Pengaturan"]]);
   if (RO && ui.tab === "pengaturan") ui.tab = "anggota";
   html += '<div class="tabs" role="tablist">' + tabs.map(([k,l]) => '<button role="tab" data-act="tab" data-v="' + k + '" aria-selected="' + (ui.tab===k) + '">' + l + '</button>').join("") + '</div>';
   if (ui.tab === "anggota") html += viewMembers(r);
   else if (ui.tab === "riwayat") html += viewHistory();
+  else if (ui.tab === "laporan") html += viewReport();
   else html += viewSettings();
   html += '<footer>Putaran berjalan: ' + (S.current+1) + ' · Pot per putaran ' + rp(P) + (mode === "remote" ? ' · <a href="' + esc(location.pathname) + '" style="color:inherit">Arisan lain</a>' : '') + '</footer></div>';
   return html;
@@ -685,6 +686,103 @@ function summaryText(r){
     + (w.length ? "\nPenerima (" + rp(payout(r)) + (w.length > 1 ? " per orang" : "") + "):\n" + w.map(m => (payoutOf(r, m.id) ? "✅ " : "⏳ ") + m.name + (payoutOf(r, m.id) ? " — sudah ditransfer" + (payoutOf(r, m.id).proof ? ", bukti di link" : "") : " — belum ditransfer")).join("\n") : "\nPenerima: belum dikocok")
     + (mode === "remote" ? "\n\n" + shareUrl() : "");
 }
+/* ---------- laporan per anggota ---------- */
+function memberReport(m){
+  const amt = Number(m.amount) || 0, R = totalRounds(), due = Math.min(S.current + 1, R);
+  let paidN = 0, paidDue = 0;
+  const unpaidDue = [];
+  for (let i = 0; i < R; i++) {
+    if (isPaid(i, m.id)) { paidN++; if (i < due) paidDue++; }
+    else if (i < due) unpaidDue.push(i);
+  }
+  const wr = wonRound(m.id), po = wr >= 0 ? payoutOf(wr, m.id) : null;
+  const received = po ? payout(wr) : 0;
+  const deposit = paidN * amt;
+  return { m, amt, R, due, paidN, deposit, required: due * amt, arrears: unpaidDue.length * amt, unpaidDue,
+    remaining: Math.max(0, R * amt - deposit), wr, received, scheduled: wr >= 0 ? payout(wr) : 0, transferred: !!po, net: received - deposit };
+}
+function cashSummary(){
+  const R = totalRounds();
+  let inflow = 0, outflow = 0;
+  for (let i = 0; i < R; i++) {
+    inflow += collected(i);
+    winIds(i).forEach(id => { if (payoutOf(i, id)) outflow += payout(i); });
+  }
+  return { inflow, outflow, balance: inflow - outflow };
+}
+function statusOf(rep){
+  if (rep.arrears > 0) return '<span class="chip warn">Nunggak ' + rep.unpaidDue.length + 'x</span>';
+  return '<span class="chip ok">Lancar</span>';
+}
+function winOf(rep){
+  if (rep.wr < 0) return '<span class="muted">Belum dapat</span>';
+  return '<span class="chip gold">P' + (rep.wr+1) + '</span>' + (rep.transferred ? ' <span class="chip ok">diterima</span>' : ' <span class="chip">belum ditransfer</span>');
+}
+function viewReport(){
+  const reps = S.members.map(memberReport);
+  const cash = cashSummary();
+  const arrearsTotal = reps.reduce((a, x) => a + x.arrears, 0), late = reps.filter(x => x.arrears > 0);
+  const sortKey = ui.repSort || "name";
+  const sorted = reps.slice().sort((a, b) => sortKey === "arrears" ? b.arrears - a.arrears || a.m.name.localeCompare(b.m.name)
+    : sortKey === "round" ? ((a.wr < 0 ? 999 : a.wr) - (b.wr < 0 ? 999 : b.wr)) : a.m.name.localeCompare(b.m.name));
+  let h = '<section class="panel" aria-label="Ringkasan kas"><div class="toolbar"><h2>Ringkasan kas</h2><span class="muted" style="font-size:13px">s.d. putaran ' + (S.current+1) + ' dari ' + totalRounds() + '</span></div>'
+    + '<div class="stats cash"><div class="stat"><b>' + rp(cash.inflow) + '</b><span>Total iuran masuk</span></div>'
+    + '<div class="stat"><b>' + rp(cash.outflow) + '</b><span>Sudah ditransfer ke pemenang</span></div>'
+    + '<div class="stat"><b>' + rp(cash.balance) + '</b><span>Saldo di bendahara</span></div>'
+    + '<div class="stat"><b' + (arrearsTotal ? ' style="color:var(--warn)"' : '') + '>' + rp(arrearsTotal) + '</b><span>Tunggakan · ' + late.length + ' orang</span></div></div>';
+  if (late.length) h += '<p class="muted" style="margin:0;font-size:13.5px">Menunggak: ' + late.map(x => esc(x.m.name) + ' (' + x.unpaidDue.map(i => 'P' + (i+1)).join(", ") + ')').join(" · ") + '</p>';
+  h += '</section>';
+
+  h += '<section class="panel" aria-label="Laporan per anggota"><div class="toolbar"><h2>Laporan per anggota</h2><div class="seg" role="group" aria-label="Urutkan">'
+    + [["name","Nama"],["arrears","Tunggakan"],["round","Giliran"]].map(([k,l]) => '<button data-act="repSort" data-v="' + k + '" aria-pressed="' + (sortKey===k) + '">' + l + '</button>').join("")
+    + '<button data-act="repCsv"' + (reps.length ? '' : ' disabled') + '>Unduh CSV</button></div></div>';
+  if (!reps.length) return h + '<div class="empty">Belum ada anggota.</div></section>';
+  h += '<div class="scroll"><table class="report"><thead><tr><th>Anggota</th><th>Iuran</th><th>Setor</th><th>Total setor</th><th>Tunggakan</th><th>Sisa kewajiban</th><th>Giliran</th><th>Diterima</th><th>Status</th></tr></thead><tbody>';
+  sorted.forEach(x => {
+    h += '<tr><td><button class="linkish" data-act="repOpen" data-id="' + esc(x.m.id) + '" aria-expanded="' + (ui.repOpen === x.m.id) + '">' + esc(x.m.name) + '</button></td>'
+      + '<td class="num">' + rp(x.amt) + '</td><td class="num">' + x.paidN + '/' + x.R + '</td><td class="num">' + rp(x.deposit) + '</td>'
+      + '<td class="num"' + (x.arrears ? ' style="color:var(--warn);font-weight:600"' : '') + '>' + (x.arrears ? rp(x.arrears) : '–') + '</td>'
+      + '<td class="num">' + rp(x.remaining) + '</td><td>' + winOf(x) + '</td>'
+      + '<td class="num">' + (x.received ? rp(x.received) : (x.wr >= 0 ? '<span class="muted">' + rp(x.scheduled) + '</span>' : '–')) + '</td><td>' + statusOf(x) + '</td></tr>';
+    if (ui.repOpen === x.m.id) h += '<tr class="detail"><td colspan="9">' + memberLedger(x) + '</td></tr>';
+  });
+  const tot = k => reps.reduce((a, x) => a + x[k], 0);
+  h += '</tbody><tfoot><tr><td><b>Total</b></td><td></td><td></td><td class="num"><b>' + rp(tot("deposit")) + '</b></td><td class="num"><b>' + (tot("arrears") ? rp(tot("arrears")) : '–') + '</b></td><td class="num"><b>' + rp(tot("remaining")) + '</b></td><td></td><td class="num"><b>' + rp(tot("received")) + '</b></td><td></td></tr></tfoot></table></div>'
+    + '<p class="muted" style="margin:0;font-size:13px">Klik nama untuk melihat rincian per putaran dan menyalin laporan pribadi untuk dikirim lewat WhatsApp. Angka "Diterima" berwarna abu-abu berarti giliran sudah ditentukan tapi belum ditransfer.</p></section>';
+  return h;
+}
+function memberLedger(x){
+  let h = '<div class="ledger"><div class="ledger-head"><div><b>' + esc(x.m.name) + '</b> · iuran ' + rp(x.amt) + ' / putaran'
+    + (x.net !== 0 || x.received ? ' · posisi bersih <span class="num" style="color:' + (x.net >= 0 ? 'var(--ok)' : 'var(--ink)') + '">' + (x.net >= 0 ? '+' : '−') + rp(Math.abs(x.net)) + '</span>' : '') + '</div>'
+    + '<button data-act="repCopy" data-id="' + esc(x.m.id) + '">Salin laporan untuk ' + esc(x.m.name.split(" ")[0]) + '</button></div><div class="ledger-grid">';
+  for (let i = 0; i < x.R; i++) {
+    const p = isPaid(i, x.m.id), past = i <= S.current, win = x.wr === i;
+    h += '<div class="lg' + (p ? ' paid' : (past ? ' late' : '')) + (win ? ' win' : '') + '"><span class="eyebrow">P' + (i+1) + ' · ' + fDate(roundDate(i), {day:"numeric", month:"short"}) + '</span>'
+      + '<b>' + (p ? 'Setor ' + fShort(S.payments[i][x.m.id]) : (past ? 'Belum setor' : '–')) + '</b>'
+      + (win ? '<span>★ Giliran dapat ' + rp(payout(i)) + (x.transferred ? ' · diterima' : '') + '</span>' : '') + '</div>';
+  }
+  return h + '</div></div>';
+}
+function memberStatement(x){
+  const lines = [];
+  for (let i = 0; i < x.R; i++) {
+    const p = isPaid(i, x.m.id), past = i <= S.current;
+    lines.push((p ? "✅" : (past ? "❌" : "▫️")) + " P" + (i+1) + " (" + fDate(roundDate(i), {day:"numeric", month:"short"}) + ")" + (p ? " setor" : (past ? " belum setor" : "")) + (x.wr === i ? " ★ giliran dapat" : ""));
+  }
+  return "*Laporan " + (S.name || "Arisan") + "*\n" + x.m.name + " · iuran " + rp(x.amt) + "/putaran\n\n" + lines.join("\n")
+    + "\n\nTotal setor: " + rp(x.deposit) + " (" + x.paidN + "/" + x.R + " putaran)"
+    + (x.arrears ? "\nTunggakan: " + rp(x.arrears) + " (" + x.unpaidDue.map(i => "P" + (i+1)).join(", ") + ")" : "\nTunggakan: tidak ada")
+    + "\nSisa kewajiban sampai akhir: " + rp(x.remaining)
+    + (x.wr >= 0 ? "\nGiliran: putaran " + (x.wr+1) + ", " + rp(x.scheduled) + (x.transferred ? " (sudah diterima)" : " (belum ditransfer)") : "\nGiliran: belum dapat")
+    + payLines() + (mode === "remote" ? "\n\nCek status: " + shareUrl() : "");
+}
+function reportCsv(){
+  const q = v => '"' + String(v).replace(/"/g, '""') + '"';
+  const head = ["Anggota","Iuran per putaran","Putaran disetor","Total putaran","Total setor","Tunggakan","Putaran nunggak","Sisa kewajiban","Giliran","Nominal giliran","Sudah diterima","Posisi bersih"];
+  const rows = S.members.map(memberReport).map(x => [x.m.name, x.amt, x.paidN, x.R, x.deposit, x.arrears, x.unpaidDue.map(i => "P" + (i+1)).join(" "), x.remaining,
+    x.wr >= 0 ? "P" + (x.wr+1) : "", x.wr >= 0 ? x.scheduled : "", x.received, x.net]);
+  return "﻿" + [head].concat(rows).map(r => r.map(q).join(",")).join("\n");
+}
 function csvText(){
   const R = totalRounds(), q = v => '"' + String(v).replace(/"/g, '""') + '"';
   const head = ["Anggota","Nominal","No WA"].concat(Array.from({length:R}, (_,i) => "P" + (i+1) + " " + roundDate(i).toISOString().slice(0,10))).concat(["Dapat putaran"]);
@@ -739,6 +837,10 @@ app.addEventListener("click", e => {
     case "setCurrent": if (!mustEdit()) return; S.current = ui.round; commit("Putaran berjalan diubah ke " + (S.current+1)); break;
     case "remind": copy(reminderText(ui.round), "Pengingat tersalin, tempel di grup WA"); break;
     case "summary": copy(summaryText(ui.round), "Rekap tersalin"); break;
+    case "repSort": ui.repSort = b.dataset.v; render(); break;
+    case "repOpen": ui.repOpen = ui.repOpen === id ? null : id; render(); break;
+    case "repCsv": download(slug() + "-laporan-anggota.csv", reportCsv(), "text/csv;charset=utf-8"); break;
+    case "repCopy": { const m = S.members.find(x => x.id === id); if (m) copy(memberStatement(memberReport(m)), "Laporan " + m.name + " tersalin"); break; }
     case "csv": download(slug() + "-riwayat.csv", csvText(), "text/csv;charset=utf-8"); break;
     case "roll": {
       if (!mustEdit()) return;
