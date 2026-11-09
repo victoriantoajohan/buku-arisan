@@ -1,0 +1,86 @@
+# Backup mingguan Buku Arisan: data, gambar QRIS, dan bukti transfer.
+# Repo ini publik, jadi backup TIDAK pernah disimpan sebagai teks biasa di sini:
+#  - BACKUP_PASSPHRASE  → file dienkripsi (AES-256) dan disimpan sebagai artifact 90 hari
+#  - BACKUP_REPO + BACKUP_TOKEN → file disalin ke repo GitHub PRIVAT (dicek dulu benar-benar privat)
+# Pulihkan lewat aplikasi: Pengaturan → Cadangan data → Pulihkan dari file backup.
+name: Backup mingguan
+
+on:
+  schedule:
+    - cron: "23 2 * * 0"   # Minggu 02:23 UTC = 09:23 WIB
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arisan-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Hanya penanda "sudah diisi"; nilainya tidak pernah ditampilkan.
+      HAS_PASS: ${{ secrets.BACKUP_PASSPHRASE != '' }}
+      HAS_REPO: ${{ secrets.BACKUP_REPO != '' && secrets.BACKUP_TOKEN != '' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Ambil data
+        id: dump
+        run: node scripts/backup.mjs
+        env:
+          ARISAN_ID: ${{ secrets.ARISAN_ID }}
+          OUT_DIR: ${{ runner.temp }}/backup
+
+      - name: Enkripsi
+        id: enc
+        if: steps.dump.outputs.file != '' && env.HAS_PASS == 'true'
+        env:
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+          FILE: ${{ steps.dump.outputs.file }}
+        run: |
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -salt -in "$FILE" -out "$FILE.enc" -pass env:BACKUP_PASSPHRASE
+          echo "file=$FILE.enc" >> "$GITHUB_OUTPUT"
+
+      - name: Simpan sebagai artifact (terenkripsi)
+        if: steps.enc.outputs.file != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: buku-arisan-backup-${{ steps.dump.outputs.date }}
+          path: ${{ steps.enc.outputs.file }}
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Simpan ke repo privat
+        if: steps.dump.outputs.file != '' && env.HAS_REPO == 'true'
+        env:
+          REPO: ${{ secrets.BACKUP_REPO }}
+          TOKEN: ${{ secrets.BACKUP_TOKEN }}
+          FILE: ${{ steps.dump.outputs.file }}
+          DATE: ${{ steps.dump.outputs.date }}
+        run: |
+          set -euo pipefail
+          REPO=$(echo "$REPO" | sed -E 's#^https?://github.com/##; s#\.git$##; s#/+$##')
+          priv=$(curl -fsS -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$REPO" | jq -r '.private')
+          if [ "$priv" != "true" ]; then
+            echo "::error::BACKUP_REPO bukan repo privat atau token tidak punya akses. Backup TIDAK disimpan ke repo."
+            exit 1
+          fi
+          git clone --quiet --depth 1 "https://x-access-token:${TOKEN}@github.com/${REPO}.git" dest 2>/dev/null
+          cd dest
+          mkdir -p "backups/${DATE:0:4}"
+          cp "$FILE" "backups/${DATE:0:4}/buku-arisan-backup-$DATE.json"
+          cp "$FILE" latest.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "Tidak ada perubahan."; exit 0; fi
+          git commit --quiet -m "Backup $DATE"
+          git push --quiet origin "HEAD:$(git symbolic-ref --short HEAD 2>/dev/null || echo main)"
+          echo "Backup tersimpan di repo privat."

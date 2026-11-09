@@ -145,6 +145,38 @@ Provider lain: buat **variable** `WA_PROVIDER` = `fonnte` (secret `FONNTE_TOKEN`
 
 Log Actions di repo publik bisa dilihat siapa saja, jadi skrip tidak mencetak isi pesan, nama lengkap, atau nomor telepon utuh. Bila ada kiriman yang gagal, workflow ditandai gagal dan GitHub mengirim email.
 
+## Layar kocok (TV / proyektor)
+
+Tombol **Layar kocok** di panel Kocokan membuka tampilan layar penuh bertema gelap untuk acara kumpul: nama arisan, tanggal, papan nama semua peserta, animasi undian, kartu pemenang dengan konfeti dan suara, serta progres transfer.
+
+- Buka link arisan di laptop yang tersambung ke TV, lalu klik **Layar kocok**. Tidak perlu login.
+- Bendahara menekan **Kocok** dari HP-nya. TV ikut memutar undian secara langsung lalu menampilkan pemenang yang sama.
+- Bila bendahara login di perangkat TV itu sendiri: **Spasi** = kocok, **← →** = pindah putaran, **F** = layar penuh, **Esc** = keluar.
+
+## Pasang di HP (PWA)
+
+Tombol **Pasang di HP** memasang Buku Arisan ke layar utama (Android: langsung; iPhone: petunjuk *Bagikan → Tambah ke Layar Utama*). Ikon membuka arisan terakhir yang dibuka, dan data terakhir tetap bisa dilihat saat offline (status *Offline · data …*).
+
+## Kalender
+
+**Tambah ke kalender** mengunduh file `.ics` berisi semua jadwal kocokan dengan pengingat H-3 dan H-1 pukul 09.00. Mengimpor ulang file terbaru memperbarui acara yang sama (nama pemenang ikut tertulis). Tab Riwayat juga punya tautan **Google Calendar** untuk putaran berikutnya.
+
+## Backup otomatis mingguan
+
+Workflow `.github/workflows/backup.yml` berjalan setiap Minggu 09.23 WIB dan menyimpan data, gambar QRIS, serta bukti transfer dalam satu file JSON. Karena repo ini publik, backup **tidak pernah** disimpan sebagai teks biasa di sini. Pilih salah satu atau keduanya:
+
+| Secret | Hasil |
+|---|---|
+| `BACKUP_PASSPHRASE` | File dienkripsi AES-256 dan disimpan sebagai artifact selama 90 hari (tab **Actions → Backup mingguan → Artifacts**). |
+| `BACKUP_REPO` + `BACKUP_TOKEN` | File disalin ke repo GitHub **privat** (`backups/YYYY/…json` + `latest.json`). Token: *fine-grained personal access token* dengan akses **Contents: Read and write** hanya ke repo itu. Workflow menolak menyimpan bila repo ternyata publik. |
+
+Selama belum ada tujuan yang diisi, run terjadwal dilewati tanpa error. Uji dengan **Actions → Backup mingguan → Run workflow**.
+
+**Memulihkan:** aplikasi → **Pengaturan → Cadangan data → Pulihkan dari file backup**, pilih file `.json` atau `.json.enc` (masukkan kata sandi untuk file terenkripsi). Data, QRIS, dan bukti transfer dipulihkan sekaligus. Dekripsi manual juga bisa:
+```
+openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -md sha256 -in buku-arisan-backup-YYYY-MM-DD.json.enc -out backup.json
+```
+
 ## Laporan
 
 Tab **Laporan** (terlihat semua anggota) berisi ringkasan kas (iuran masuk, sudah ditransfer ke pemenang, saldo di bendahara, tunggakan) dan tabel per anggota: total setor, tunggakan, sisa kewajiban, giliran, dan uang yang sudah diterima. Klik nama untuk rincian per putaran dan **Salin laporan** pribadi untuk dikirim lewat WhatsApp. Tersedia juga ekspor CSV.

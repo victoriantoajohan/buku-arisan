@@ -43,6 +43,9 @@ let version = 0;
 let saveState = "idle";        // idle | saving | saved | error
 let saveTimer = null, saving = false, dirty = false;
 let channel = null;
+let offline = false, offlineAt = 0, deferredInstall = null;
+const SNAP_KEY = id => "buku-arisan-snap-" + id;
+const isStandalone = () => (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || window.navigator.standalone === true;
 let loadError = "";
 let qrData = null, qrHash = null;   // gambar QR disimpan terpisah dari data utama
 const DEMO_QR_KEY = "buku-arisan-demo-qr";
@@ -150,6 +153,7 @@ async function save(){
     const res = await rpc("save_arisan", { p_id: GID, p_pin: pin, p_data: S, p_version: version });
     if (res && res.ok) {
       version = res.version; saveState = "saved";
+      lsSet(SNAP_KEY(GID), JSON.stringify({ at: Date.now(), res: { ok: true, name: S.name, data: S, version, qr_hash: qrHash } }));
       rememberRecent(GID, S.name);
       if (channel) channel.send({ type: "broadcast", event: "updated", payload: { version } });
     } else {
@@ -184,6 +188,8 @@ async function loadRemote(force){
   try {
     const res = await rpc("get_arisan", { p_id: GID });
     if (!res) { view = "notfound"; render(); return; }
+    lsSet(SNAP_KEY(GID), JSON.stringify({ at: Date.now(), res }));
+    if (offline) { offline = false; renderStatus(); }
     syncQr(res.qr_hash);
     if (force || res.version > version) {
       const first = view !== "app";
@@ -192,7 +198,11 @@ async function loadRemote(force){
       view = "app"; render();
     }
   } catch(e) {
-    if (view !== "app") { view = "error"; loadError = e.message || String(e); render(); }
+    if (view !== "app") {
+      let snap = null; try { snap = JSON.parse(lsGet(SNAP_KEY(GID)) || "null"); } catch(_){}
+      if (snap && snap.res) { applyRemote(snap.res); ui.round = S.current; offline = true; offlineAt = snap.at; view = "app"; render(); return; }
+      view = "error"; loadError = e.message || String(e); render();
+    } else if (!offline) { offline = true; offlineAt = offlineAt || Date.now(); renderStatus(); }
   }
 }
 function pendingLocal(){ return saving || dirty || !!saveTimer || ui.rolling; }
@@ -200,7 +210,13 @@ function startSync(){
   channel = sb.channel("arisan-" + GID, { config: { broadcast: { self: false } } });
   channel.on("broadcast", { event: "updated" }, ({ payload }) => {
     if (payload && payload.version > version && !pendingLocal()) loadRemote(false);
-  }).on("broadcast", { event: "qr" }, ({ payload }) => { if (payload) syncQr(payload.qr_hash); }).subscribe();
+  }).on("broadcast", { event: "qr" }, ({ payload }) => { if (payload) syncQr(payload.qr_hash); })
+    .on("broadcast", { event: "rolling" }, ({ payload }) => {
+      if (!payload || !ui.tv) return;
+      if (payload.round !== ui.round) { ui.round = Math.min(payload.round, totalRounds()-1); ui.tv.known = new Set(winIds(ui.round)); }
+      tvStartSpin(Math.min(15000, Math.max(800, +payload.ms || 3000)));
+      setTimeout(() => { if (!pendingLocal()) loadRemote(false); }, (+payload.ms || 3000) + 1500);
+    }).subscribe();
   setInterval(() => { if (document.visibilityState === "visible" && !pendingLocal()) loadRemote(false); }, 20000);
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && !pendingLocal()) loadRemote(false); });
 }
@@ -215,6 +231,14 @@ async function tryLogin(p, silent){
 function logout(){ isAdmin = false; pin = null; lsSet(PIN_KEY(GID), null); render(); }
 
 async function boot(){
+  if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
+  window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); deferredInstall = e; render(); });
+  window.addEventListener("appinstalled", () => { deferredInstall = null; render(); toast("Buku Arisan terpasang di perangkat ini"); });
+  window.addEventListener("online", () => { if (GID && mode === "remote") loadRemote(false); });
+  if (params.get("source") === "pwa" && !GID) {
+    let recent = []; try { recent = JSON.parse(lsGet(RECENT_KEY) || "[]"); } catch(e){}
+    if (recent[0] && recent[0].id) { location.replace(location.pathname + "?g=" + recent[0].id); return; }
+  }
   if (mode === "demo") {
     let L = null; try { L = JSON.parse(lsGet(DEMO_KEY) || "null"); } catch(e){}
     S = blank(L && L.v === 1 ? L : JSON.parse(JSON.stringify(SAMPLE)));
@@ -235,6 +259,7 @@ async function boot(){
 /* ---------- views ---------- */
 function statusChip(){
   if (mode === "demo") return '<span class="chip gold"><i class="dot"></i>Mode demo · tersimpan di perangkat ini</span>';
+  if (offline) return '<span class="chip warn"><i class="dot"></i>Offline · data ' + esc(new Date(offlineAt || Date.now()).toLocaleString("id-ID", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })) + '</span>';
   if (!isAdmin) return '<span class="chip"><i class="dot"></i>Mode lihat</span>';
   if (saveState === "saving") return '<span class="chip acc"><i class="dot"></i>Menyimpan…</span>';
   if (saveState === "error") return '<span class="chip warn"><i class="dot"></i>Belum tersimpan</span>';
@@ -251,6 +276,7 @@ function render(){
   else if (view === "error") html = '<div class="wrap landing"><div class="panel"><h2>Gagal memuat</h2><p class="muted" style="margin:0">' + esc(loadError) + '</p><div class="actions"><button data-act="reload">Coba lagi</button></div></div></div>';
   else html = viewApp();
   app.innerHTML = html;
+  if (ui.tv) renderTV();
   if (ae && document.getElementById(ae) && ae !== "copyFallback") { const el = document.getElementById(ae); el.focus(); if (el.type === "search" && el.setSelectionRange) { const v = el.value.length; el.setSelectionRange(v, v); } }
 }
 
@@ -258,7 +284,7 @@ function viewLanding(){
   let recent = []; try { recent = JSON.parse(lsGet(RECENT_KEY) || "[]"); } catch(e){}
   const today = new Date().toISOString().slice(0,10);
   let h = '<div class="wrap landing"><header class="hero"><div class="eyebrow">Buku Arisan</div><h1>Catat iuran, kocok pemenang, kirim pengingat.</h1>'
-    + '<p>Buat arisan baru, lalu bagikan linknya ke grup. Semua anggota bisa melihat siapa yang sudah transfer, dan hanya bendahara yang memegang PIN bisa mengubah data.</p></header>';
+    + installBtn() + '<p>Buat arisan baru, lalu bagikan linknya ke grup. Semua anggota bisa melihat siapa yang sudah transfer, dan hanya bendahara yang memegang PIN bisa mengubah data.</p></header>';
   if (recent.length) h += '<section class="panel recent"><h2>Arisan di perangkat ini</h2><div class="list">'
     + recent.map(r => '<div class="row" style="grid-template-columns:1fr auto"><a href="?g=' + esc(r.id) + '">' + esc(r.name) + '</a><span class="chip">' + (lsGet(PIN_KEY(r.id)) ? 'Bendahara' : 'Anggota') + '</span></div>').join("") + '</div></section>';
   h += '<section class="panel"><h2>Buat arisan baru</h2><form id="createForm" class="form" autocomplete="off">'
@@ -291,7 +317,7 @@ function viewApp(){
   let html = '<div class="wrap">';
   html += '<header class="top"><div><div class="eyebrow">Buku Arisan</div><h1>' + esc(S.name || "Arisan") + '</h1>'
     + '<div class="meta"><span>' + esc(cycleLabel[S.cycle] || "Bulanan") + '</span><span class="num">' + rp(S.defaultAmount) + ' / orang</span><span>' + N + ' anggota</span>' + (K() > 1 ? '<span>' + K() + ' pemenang / putaran</span>' : '') + '<span>Mulai ' + fDate(roundDate(0)) + '</span></div></div>'
-    + '<div class="hdr-actions"><span id="status">' + statusChip() + '</span>';
+    + '<div class="hdr-actions"><span id="status">' + statusChip() + '</span>' + installBtn();
   if (mode === "remote") {
     html += '<button data-act="share">Salin link grup</button>';
     html += isAdmin ? '<button class="ghost" data-act="logout">Keluar</button>' : '<button class="primary" data-act="openLogin">Masuk bendahara</button>';
@@ -320,12 +346,13 @@ function viewApp(){
   html += '<div class="actions">'
     + '<button data-act="remind"' + (N-paidN===0?' disabled':'') + '>Salin pengingat WA</button>'
     + '<button data-act="summary"' + (N===0?' disabled':'') + '>Salin rekap</button>'
+    + '<button data-act="ics"' + (N===0?' disabled':'') + '>Tambah ke kalender</button>'
     + (RO ? '' : '<button data-act="allPaid"' + (N===0||paidN===N?' disabled':'') + '>' + (ui.armed.allPaid ? 'Yakin tandai semua?' : 'Tandai semua lunas') + '</button>')
     + (!RO && isCur && r < totalRounds()-1 ? '<button class="primary" data-act="advance">' + (ui.armed.advance ? 'Yakin lanjut?' : 'Mulai putaran ' + (r+2)) + '</button>' : '')
     + (!RO && !isCur ? '<button data-act="setCurrent">Jadikan putaran berjalan</button>' : '')
     + '</div><textarea id="copyFallback" hidden aria-label="Teks untuk disalin"></textarea></section>';
 
-  html += '<section class="panel" aria-label="Kocokan"><div class="toolbar"><h2>Kocokan</h2><span class="chip gold">' + notYet.length + ' belum dapat</span></div>';
+  html += '<section class="panel" aria-label="Kocokan"><div class="toolbar"><h2>Kocokan</h2><div class="actions" style="gap:6px;align-items:center"><span class="chip gold">' + notYet.length + ' belum dapat</span><button class="btn-tv" data-act="tvOpen" title="Tampilan layar penuh untuk TV atau proyektor">Layar kocok</button></div></div>';
   const fundChip = paidN < N ? '<span class="chip warn">Dana belum lengkap: kurang ' + rp(P-C) + '</span>' : '<span class="chip ok">Dana lengkap, siap diserahkan</span>';
   if (ui.rolling) {
     html += '<div class="drum"><span class="eyebrow">Mengocok ' + ui.rollCount + ' pemenang…</span><div class="slip rolling" id="rollName">' + esc(ui.rollName) + '</div></div>';
@@ -429,7 +456,11 @@ function viewHistory(){
     for (let i=0;i<R;i++){ const c = collected(i); grand += c; h += '<td class="num" style="font-size:12px">' + (c ? (c/1000).toLocaleString("id-ID") + 'rb' : '–') + '</td>'; }
     h += '<td class="num">' + rp(grand) + '</td></tr></tbody></table></div>';
   }
-  h += '</section><section class="panel"><h2>Penerima per putaran</h2><div class="list">';
+  const nx = nextRound();
+  h += '</section><section class="panel"><div class="toolbar"><h2>Penerima per putaran</h2><div class="actions" style="gap:6px">'
+    + '<button data-act="ics">Unduh jadwal (.ics)</button>'
+    + (nx != null ? '<a class="btn" target="_blank" rel="noopener" href="' + esc(gcalUrl(nx)) + '">Google Calendar · P' + (nx+1) + '</a>' : '')
+    + '</div></div><div class="list">';
   for (let i=0;i<R;i++){
     const w = winnersOf(i);
     h += '<div class="row" style="grid-template-columns:auto 1fr auto"><span class="chip ' + (w.length?'gold':'') + '">P' + (i+1) + '</span><div class="who"><div class="name">' + (w.length ? esc(names(w)) : '<span class="muted">Belum dikocok</span>') + (w.length && w.length < slots(i) ? ' <span class="chip warn">' + (slots(i) - w.length) + ' slot kosong</span>' : '') + '</div><div class="sub">' + fDate(roundDate(i))
@@ -452,7 +483,10 @@ function viewSettings(){
     + '</div>' + kInfo() + '<div class="actions"><button data-act="applyAmount">' + (ui.armed.applyAmount ? 'Yakin ubah semua?' : 'Samakan nominal semua anggota') + '</button></div></section>';
   h += '<section class="panel"><h2>Cadangan data</h2><p class="muted" style="margin:0">Unduh atau salin data untuk disimpan. Tempel di kotak impor untuk memulihkan.</p>'
     + '<div class="actions"><button data-act="exportJson">Unduh cadangan (.json)</button><button data-act="copyJson">Salin data</button></div>'
-    + '<label class="f">Impor data<textarea id="importBox" placeholder="Tempel data cadangan di sini"></textarea></label>'
+    + '<div class="restore"><label class="btn" for="restoreFile">Pulihkan dari file backup</label><input id="restoreFile" type="file" accept=".json,.enc,application/json,application/octet-stream" hidden>'
+    + '<span class="muted" style="font-size:12.5px">File .json dari tombol di atas atau dari backup mingguan (.json / .json.enc)</span></div>'
+    + restoreHtml()
+    + '<label class="f">Impor data (teks)<textarea id="importBox" placeholder="Tempel data cadangan di sini"></textarea></label>'
     + '<div class="actions"><button data-act="importJson">Impor</button>'
     + '<button class="danger' + (ui.armed.reset?' armed':'') + '" data-act="reset">' + (ui.armed.reset ? 'Hapus semua data?' : 'Hapus semua data') + '</button></div></section>';
   h += viewPaySettings();
@@ -677,6 +711,283 @@ function viewPaySettings(){
   return h + '</div></section>';
 }
 
+/* ---------- PWA: pasang di HP ---------- */
+function installBtn(){
+  if (isStandalone()) return '';
+  return '<button class="ghost" data-act="install" title="Pasang Buku Arisan di layar utama">Pasang di HP</button>';
+}
+async function doInstall(){
+  if (deferredInstall) {
+    const ev = deferredInstall; deferredInstall = null;
+    try { ev.prompt(); const c = await ev.userChoice; if (c && c.outcome === "dismissed") deferredInstall = ev; } catch(e){}
+    render(); return;
+  }
+  const ua = navigator.userAgent || "";
+  const ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && "ontouchend" in document);
+  const steps = ios
+    ? ['Buka halaman ini di <b>Safari</b>.', 'Ketuk tombol <b>Bagikan</b> (kotak dengan panah ke atas).', 'Pilih <b>Tambah ke Layar Utama</b>, lalu <b>Tambah</b>.']
+    : ['Buka halaman ini di <b>Chrome</b>.', 'Ketuk menu <b>⋮</b> di pojok kanan atas.', 'Pilih <b>Instal aplikasi</b> atau <b>Tambahkan ke layar utama</b>.'];
+  showSheet('<h2>Pasang di layar utama</h2><ol class="steps">' + steps.map(x => '<li>' + x + '</li>').join("") + '</ol>'
+    + '<p class="muted" style="margin:0;font-size:13.5px">Setelah terpasang, ikon Buku Arisan muncul di layar utama dan langsung membuka arisan terakhir yang kamu buka. Data terakhir tetap bisa dilihat walau sedang offline.</p>');
+}
+function showSheet(inner){
+  let el = document.getElementById("sheet");
+  if (!el) { el = document.createElement("div"); el.id = "sheet"; el.className = "modal"; el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true"); document.body.appendChild(el); }
+  el.innerHTML = '<div class="modal-card">' + inner + '<div class="actions"><button class="primary" data-act="closeSheet">Mengerti</button></div></div>';
+  const b = el.querySelector("button"); if (b) b.focus();
+}
+function closeSheet(){ const el = document.getElementById("sheet"); if (el) el.remove(); }
+
+/* ---------- kalender (.ics) ---------- */
+const pad2 = n => String(n).padStart(2, "0");
+const ymd = d => d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate());
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+function nextRound(){
+  const t = new Date(); t.setHours(0, 0, 0, 0);
+  for (let i = 0; i < totalRounds(); i++) if (roundDate(i) >= t) return i;
+  return null;
+}
+function roundDetails(i){
+  const w = winnersOf(i), k = slots(i);
+  return "Iuran " + rp(S.defaultAmount) + " per orang. Pot " + rp(pot()) + (k > 1 ? " (" + rp(payout(i)) + " per pemenang)" : "") + ".\n"
+    + (w.length ? "Pemenang: " + names(w) + "." : "Pemenang: belum dikocok.")
+    + (mode === "remote" ? "\n" + shareUrl() : "");
+}
+function gcalUrl(i){
+  const d = roundDate(i);
+  return "https://calendar.google.com/calendar/render?action=TEMPLATE&text=" + encodeURIComponent("Kocokan " + (S.name || "Arisan") + " — Putaran " + (i+1))
+    + "&dates=" + ymd(d) + "/" + ymd(addDays(d, 1)) + "&details=" + encodeURIComponent(roundDetails(i));
+}
+function icsText(){
+  const esc2 = v => String(v).replace(/\\/g, "\\\\").replace(/;/g, "\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+  const enc = new TextEncoder();
+  const fold = line => { const out = []; let cur = "", bytes = 0; for (const ch of line) { const b = enc.encode(ch).length; if (bytes + b > 73) { out.push(cur); cur = " " + ch; bytes = 1 + b; } else { cur += ch; bytes += b; } } out.push(cur); return out.join("\r\n"); };
+  const now = new Date(), stamp = now.getUTCFullYear() + pad2(now.getUTCMonth()+1) + pad2(now.getUTCDate()) + "T" + pad2(now.getUTCHours()) + pad2(now.getUTCMinutes()) + pad2(now.getUTCSeconds()) + "Z";
+  const name = S.name || "Arisan", L = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Buku Arisan//ID", "CALSCALE:GREGORIAN", "METHOD:PUBLISH", "X-WR-CALNAME:" + esc2(name), "X-WR-TIMEZONE:Asia/Jakarta"];
+  for (let i = 0; i < totalRounds(); i++) {
+    const d = roundDate(i);
+    L.push("BEGIN:VEVENT", "UID:buku-arisan-" + (GID || "demo") + "-p" + (i+1) + "@victoriantoajohan.github.io", "DTSTAMP:" + stamp, "SEQUENCE:" + (version || 0),
+      "DTSTART;VALUE=DATE:" + ymd(d), "DTEND;VALUE=DATE:" + ymd(addDays(d, 1)),
+      "SUMMARY:" + esc2("Kocokan " + name + " — Putaran " + (i+1)), "DESCRIPTION:" + esc2(roundDetails(i)), "TRANSP:TRANSPARENT");
+    if (mode === "remote") L.push("URL:" + shareUrl());
+    L.push("BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-P2DT15H", "DESCRIPTION:" + esc2("Kocokan " + name + " 3 hari lagi. Jangan lupa transfer iuran."), "END:VALARM",
+      "BEGIN:VALARM", "ACTION:DISPLAY", "TRIGGER:-PT15H", "DESCRIPTION:" + esc2("Besok kocokan " + name + "."), "END:VALARM", "END:VEVENT");
+  }
+  L.push("END:VCALENDAR");
+  return L.map(fold).join("\r\n") + "\r\n";
+}
+
+/* ---------- backup & pulihkan ---------- */
+function backupItem(D){
+  if (!D || typeof D !== "object") return null;
+  if (D.format === "buku-arisan-backup-set" && Array.isArray(D.items) && D.items.length) return D.items.find(x => x.id === GID) || D.items[0];
+  if (D.format === "buku-arisan-backup" && D.data) return D;
+  if (Array.isArray(D.members)) return { data: D, qr: null, proofs: [] };
+  return null;
+}
+async function decryptOpenSSL(buf, pass){
+  const u8 = new Uint8Array(buf);
+  if (new TextDecoder().decode(u8.slice(0, 8)) !== "Salted__") throw new Error("Bukan file terenkripsi backup.");
+  const salt = u8.slice(8, 16), ct = u8.slice(16);
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pass), "PBKDF2", false, ["deriveBits"]);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: 200000, hash: "SHA-256" }, base, 384));
+  const key = await crypto.subtle.importKey("raw", bits.slice(0, 32), "AES-CBC", false, ["decrypt"]);
+  try { return new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-CBC", iv: bits.slice(32, 48) }, key, ct)); }
+  catch(e) { throw new Error("Kata sandi backup salah."); }
+}
+function restoreHtml(){
+  const R = ui.restore; if (!R) return '';
+  if (R.encrypted && !R.item) {
+    return '<form class="restore-box" id="restorePassForm"><b>' + esc(R.fileName) + '</b><span class="muted">File terenkripsi. Masukkan kata sandi backup (secret BACKUP_PASSPHRASE).</span>'
+      + '<div class="login"><input id="restorePass" type="password" autocomplete="off" required placeholder="Kata sandi backup"><button class="primary" type="submit">' + (R.busy ? 'Membuka…' : 'Buka') + '</button><button type="button" class="ghost" data-act="restoreCancel">Batal</button></div>'
+      + (R.err ? '<span class="err">' + esc(R.err) + '</span>' : '') + '</form>';
+  }
+  const it = R.item, d = it.data || {};
+  return '<div class="restore-box"><b>' + esc(d.name || it.name || "Arisan") + '</b><span class="muted">'
+    + (it.exported_at ? 'Backup ' + esc(new Date(it.exported_at).toLocaleString("id-ID", { day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" })) + ' · ' : '')
+    + (d.members || []).length + ' anggota · putaran ' + ((d.current || 0) + 1) + (it.qr ? ' · QR' : '') + ((it.proofs || []).length ? ' · ' + it.proofs.length + ' bukti transfer' : '') + '</span>'
+    + '<div class="actions"><button class="danger' + (ui.armed.restore ? ' armed' : '') + '" data-act="restoreGo"' + (R.busy ? ' disabled' : '') + '>' + (R.busy ? 'Memulihkan…' : ui.armed.restore ? 'Yakin? Data sekarang akan ditimpa' : 'Pulihkan data ini') + '</button><button class="ghost" data-act="restoreCancel">Batal</button></div></div>';
+}
+async function loadRestoreFile(file){
+  if (!mustEdit()) return;
+  if (file.size > 30 * 1024 * 1024) { toast("File terlalu besar."); return; }
+  const buf = await file.arrayBuffer();
+  const head = new TextDecoder().decode(new Uint8Array(buf).slice(0, 8));
+  if (head === "Salted__") { ui.restore = { fileName: file.name, encrypted: true, buf }; render(); const el = $("#restorePass"); if (el) el.focus(); return; }
+  try {
+    const item = backupItem(JSON.parse(new TextDecoder().decode(buf)));
+    if (!item) throw 0;
+    ui.restore = { fileName: file.name, item }; render();
+  } catch(e) { toast("File tidak dikenali sebagai backup Buku Arisan."); }
+}
+async function runRestore(){
+  const it = ui.restore && ui.restore.item; if (!it || !mustEdit()) return;
+  ui.restore.busy = true; render();
+  const D = it.data, problems = [];
+  S = blank(Object.assign({}, D, { sample: false })); ui.round = S.current;
+  try {
+    if (mode === "demo") {
+      lsSet(DEMO_QR_KEY, it.qr || null); qrData = it.qr || null;
+      (it.proofs || []).forEach(p => lsSet(demoProofKey(p.round, p.member), p.image));
+    } else {
+      const q = await rpc("set_arisan_qr", { p_id: GID, p_pin: pin, p_qr: it.qr || "" });
+      if (q && q.ok) { qrData = it.qr || null; qrHash = q.qr_hash || null; } else problems.push("QR");
+      for (const p of (it.proofs || [])) {
+        const r = await rpc("set_payout_proof", { p_id: GID, p_pin: pin, p_round: p.round, p_member: p.member, p_img: p.image });
+        if (r && r.ok) { proofCache[r.hash] = p.image; const po = (S.payouts[p.round] || {})[p.member]; if (po) po.proof = r.hash; }
+        else problems.push("bukti P" + (p.round + 1));
+      }
+    }
+  } catch(e) { problems.push("koneksi"); }
+  ui.restore = null; ui.armed = {};
+  commit("Data dipulihkan dari backup" + (it.exported_at ? " " + new Date(it.exported_at).toLocaleDateString("id-ID") : ""));
+  toast(problems.length ? "Data dipulihkan, tapi gagal memulihkan: " + problems.join(", ") : "Data berhasil dipulihkan");
+}
+
+/* ---------- layar kocok (TV) ---------- */
+const reducedMotion = () => window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+function tvOpen(){
+  ui.tv = { known: new Set(winIds(ui.round)), phase: "idle", fresh: [], hold: [], sound: true, audio: null };
+  try { ui.tv.audio = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){}
+  document.body.style.overflow = "hidden";
+  renderTV();
+  const el = document.getElementById("tv");
+  if (el && el.requestFullscreen) el.requestFullscreen().catch(() => {});
+  tvWake();
+}
+function tvClose(){
+  const tv = ui.tv; if (!tv) return;
+  tvStopSpin(); clearTimeout(tv.revealT); clearTimeout(tv.freshT);
+  if (tv.lock) tv.lock.release().catch(() => {});
+  if (tv.audio) tv.audio.close().catch(() => {});
+  if (document.fullscreenElement && document.exitFullscreen) document.exitFullscreen().catch(() => {});
+  ui.tv = null; const el = document.getElementById("tv"); if (el) el.remove();
+  document.body.style.overflow = "";
+}
+function tvWake(){ if (ui.tv && navigator.wakeLock) navigator.wakeLock.request("screen").then(l => { if (ui.tv) ui.tv.lock = l; else l.release(); }).catch(() => {}); }
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && ui.tv) tvWake(); });
+function tvTone(freq, dur, type, gain, when){
+  const tv = ui.tv; if (!tv || !tv.sound || !tv.audio) return;
+  try {
+    const a = tv.audio, t = a.currentTime + (when || 0), o = a.createOscillator(), g = a.createGain();
+    o.type = type || "sine"; o.frequency.value = freq; g.gain.setValueAtTime(gain || 0.05, t); g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.connect(g).connect(a.destination); o.start(t); o.stop(t + dur + 0.02);
+  } catch(e){}
+}
+const tvChime = () => [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => tvTone(f, 0.5, "triangle", 0.09, i * 0.11));
+function tvCandidates(){ const used = allWinnerIds(); const c = S.members.filter(m => !used.has(m.id)); return c.length ? c : S.members.slice(); }
+function tvStartSpin(ms){
+  const tv = ui.tv; if (!tv) return;
+  tvStopSpin();
+  tv.phase = "spin"; tv.spinUntil = Date.now() + ms; tv.fresh = [];
+  const cand = tvCandidates(); renderTV();
+  let i = Math.floor(Math.random() * cand.length);
+  const step = () => {
+    if (!ui.tv || ui.tv.phase !== "spin" || !cand.length) return;
+    i = (i + 1 + Math.floor(Math.random() * 2)) % cand.length;
+    const m = cand[i], el = document.getElementById("tvSpin");
+    if (el) el.textContent = m.name;
+    document.querySelectorAll(".tv-chip.hot").forEach(c => c.classList.remove("hot"));
+    const chip = document.querySelector('.tv-chip[data-mid="' + ((window.CSS && CSS.escape) ? CSS.escape(m.id) : String(m.id).replace(/["\\]/g, "\\$&")) + '"]'); if (chip) chip.classList.add("hot");
+    tvTone(1250, 0.025, "square", 0.02);
+    const left = ui.tv.spinUntil - Date.now();
+    ui.tv.spinT = setTimeout(step, left > 1500 ? 70 : left > 600 ? 130 : left > 0 ? 210 : 320);
+  };
+  step();
+  tv.safety = setTimeout(() => { if (ui.tv && ui.tv.phase === "spin" && !ui.tv.hold.length) { tvStopSpin(); renderTV(); } }, ms + 15000);
+}
+function tvStopSpin(){ const tv = ui.tv; if (!tv) return; clearTimeout(tv.spinT); clearTimeout(tv.safety); if (tv.phase === "spin") tv.phase = "idle"; }
+function tvSync(){
+  const tv = ui.tv, ids = winIds(ui.round);
+  const fresh = ids.filter(id => !tv.known.has(id));
+  tv.known = new Set(ids);
+  tv.hold = tv.hold.filter(id => ids.includes(id));
+  if (!fresh.length) return;
+  const wait = Math.max(0, (tv.spinUntil || 0) - Date.now());
+  if (wait > 0) {
+    tv.hold = tv.hold.concat(fresh); clearTimeout(tv.revealT);
+    tv.revealT = setTimeout(() => { if (!ui.tv) return; const h = ui.tv.hold; ui.tv.hold = []; tvReveal(h); renderTV(); }, wait);
+  } else tvReveal(fresh);
+}
+function tvReveal(ids){
+  const tv = ui.tv; tvStopSpin(); tv.phase = "idle"; tv.spinUntil = 0; tv.fresh = ids; tv.celebrate = true;
+  clearTimeout(tv.freshT); tv.freshT = setTimeout(() => { if (ui.tv) { ui.tv.fresh = []; renderTV(); } }, 10000);
+}
+function renderTV(){
+  const tv = ui.tv; if (!tv) return;
+  let el = document.getElementById("tv");
+  if (!el) { el = document.createElement("div"); el.id = "tv"; el.className = "tv"; el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true"); el.setAttribute("aria-label", "Layar kocok"); document.body.appendChild(el); }
+  tvSync();
+  const r = ui.round, R = totalRounds(), N = S.members.length, ids = winIds(r).filter(id => !tv.hold.includes(id));
+  const ws = ids.map(id => S.members.find(m => m.id === id)).filter(Boolean);
+  const spinning = tv.phase === "spin";
+  const cand = tvCandidates(), need = slots(r) - winIds(r).length;
+  const paidN = S.members.filter(m => isPaid(r, m.id)).length, pct = N ? Math.round(paidN / N * 100) : 0;
+  const canRoll = !readOnly() && !spinning && need > 0 && S.members.some(m => !allWinnerIds().has(m.id));
+  const unpaid = N - paidN;
+  let stage;
+  if (spinning) stage = '<div class="tv-label">Mengocok' + (need > 1 ? ' ' + need + ' pemenang' : '') + '…</div><div class="tv-spin" id="tvSpin">' + esc((cand[0] || {}).name || "…") + '</div>';
+  else if (ws.length) stage = '<div class="tv-label">' + (tv.fresh.length ? 'Selamat!' : 'Penerima putaran ' + (r+1)) + '</div><div class="tv-winners n' + ws.length + '">'
+      + ws.map(m => '<div class="tv-win' + (tv.fresh.includes(m.id) ? ' fresh' : '') + '"><div class="tv-win-name">' + esc(m.name) + '</div><div class="tv-win-amt">' + rp(payout(r)) + '</div>'
+        + (payoutOf(r, m.id) ? '<div class="tv-win-tag">Sudah ditransfer</div>' : '') + '</div>').join("") + '</div>'
+      + (need > 0 ? '<div class="tv-note">Masih ' + need + ' pemenang lagi</div>' : '');
+  else stage = '<div class="tv-label">Putaran ' + (r+1) + (slots(r) > 1 ? ' · ' + slots(r) + ' pemenang' : '') + '</div><div class="tv-q">?</div>'
+      + '<div class="tv-note">' + (S.members.some(m => !allWinnerIds().has(m.id)) ? cand.length + ' peserta belum dapat · masing-masing ' + rp(payout(r)) : 'Semua anggota sudah dapat') + '</div>';
+  const wonAt = {}; for (const k in S.winners) (S.winners[k] || []).forEach(id => wonAt[id] = +k);
+  const board = S.members.map(m => {
+    const k = wonAt[m.id], here = k === r && !tv.hold.includes(m.id);
+    return '<span class="tv-chip' + (here ? ' now' : k != null && k !== r ? ' done' : '') + '" data-mid="' + esc(m.id) + '">' + esc(m.name) + (k != null && !(k === r && tv.hold.includes(m.id)) ? '<i>P' + (k+1) + '</i>' : '') + '</span>';
+  }).join("");
+  el.innerHTML = '<canvas class="tv-confetti" id="tvConfetti"></canvas>'
+    + '<div class="tv-top"><div class="tv-head"><div class="tv-eyebrow">Buku Arisan · Putaran ' + (r+1) + ' dari ' + R + '</div><div class="tv-title">' + esc(S.name || "Arisan") + '</div>'
+    + '<div class="tv-sub">' + esc(fDate(roundDate(r), { weekday: "long", day: "numeric", month: "long", year: "numeric" })) + '</div></div>'
+    + '<div class="tv-ctl"><button data-act="tvPrev" aria-label="Putaran sebelumnya"' + (r <= 0 || spinning ? ' disabled' : '') + '>‹</button><button data-act="tvNext" aria-label="Putaran berikutnya"' + (r >= R-1 || spinning ? ' disabled' : '') + '>›</button>'
+    + '<button data-act="tvSound" aria-pressed="' + tv.sound + '">' + (tv.sound ? 'Suara on' : 'Suara off') + '</button><button data-act="tvFull">Layar penuh</button><button data-act="tvClose">Tutup ✕</button></div></div>'
+    + '<div class="tv-stage" aria-live="polite">' + stage + '</div>'
+    + '<div class="tv-board">' + board + '</div>'
+    + '<div class="tv-foot"><div class="tv-paid"><div class="tv-paid-row"><span>Sudah transfer <b>' + paidN + '/' + N + '</b></span><span>Pot <b>' + rp(pot()) + '</b>' + (slots(r) > 1 ? ' · <b>' + rp(payout(r)) + '</b> per pemenang' : '') + '</span></div>'
+    + '<div class="tv-bar"><i style="width:' + pct + '%"></i></div></div>'
+    + (canRoll ? '<button class="tv-roll" data-act="tvRoll">' + (ui.armed.roll ? unpaid + ' belum transfer, tetap kocok?' : 'Kocok' + (need > 1 ? ' ' + Math.min(need, cand.length) + ' pemenang' : '') + '<small>tekan spasi</small>') + '</button>'
+      : (!readOnly() || spinning || need <= 0 ? '' : '<div class="tv-wait">Menunggu bendahara mengocok…</div>')) + '</div>';
+  if (tv.celebrate) { tv.celebrate = false; tvChime(); requestAnimationFrame(tvConfetti); }
+}
+function tvConfetti(){
+  const c = document.getElementById("tvConfetti"); if (!c || reducedMotion()) return;
+  const W = c.width = c.clientWidth * (window.devicePixelRatio || 1), H = c.height = c.clientHeight * (window.devicePixelRatio || 1), g = c.getContext("2d");
+  const cols = ["#F2B840", "#FFE08A", "#8E9BFF", "#4FC48C", "#F07B6E", "#FFFFFF"], s = window.devicePixelRatio || 1;
+  const P = Array.from({ length: 180 }, () => ({ x: W / 2 + (Math.random() - .5) * W * .3, y: H * .45, vx: (Math.random() - .5) * 26 * s, vy: (-Math.random() * 22 - 8) * s, w: (6 + Math.random() * 8) * s, h: (8 + Math.random() * 12) * s, r: Math.random() * 6, vr: (Math.random() - .5) * .4, c: cols[Math.floor(Math.random() * cols.length)] }));
+  const t0 = performance.now();
+  const frame = t => {
+    if (!ui.tv || !document.getElementById("tvConfetti")) return;
+    g.clearRect(0, 0, W, H);
+    P.forEach(p => { p.vy += 0.55 * s; p.vx *= 0.99; p.x += p.vx; p.y += p.vy; p.r += p.vr; g.save(); g.translate(p.x, p.y); g.rotate(p.r); g.fillStyle = p.c; g.fillRect(-p.w / 2, -p.h / 2, p.w, p.h); g.restore(); });
+    if (t - t0 < 4200) requestAnimationFrame(frame); else g.clearRect(0, 0, W, H);
+  };
+  requestAnimationFrame(frame);
+}
+function tvRollAction(){
+  if (!ui.tv || readOnly() || ui.tv.phase === "spin" || ui.rolling) return;
+  const unpaid = S.members.filter(m => !isPaid(ui.round, m.id)).length;
+  if (unpaid && !arm("roll")) return;
+  ui.armed = {}; roll();
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("#tv [data-act]"); if (!b || b.disabled) return;
+  const a = b.dataset.act, tv = ui.tv; if (!tv) return;
+  if (a === "tvClose") tvClose();
+  else if (a === "tvFull") { const el = document.getElementById("tv"); if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); else if (el.requestFullscreen) el.requestFullscreen().catch(() => toast("Layar penuh tidak didukung di perangkat ini")); }
+  else if (a === "tvSound") { tv.sound = !tv.sound; if (tv.sound && tv.audio && tv.audio.state === "suspended") tv.audio.resume(); renderTV(); }
+  else if (a === "tvPrev" || a === "tvNext") { ui.round = Math.max(0, Math.min(totalRounds()-1, ui.round + (a === "tvNext" ? 1 : -1))); tv.known = new Set(winIds(ui.round)); tv.fresh = []; render(); }
+  else if (a === "tvRoll") tvRollAction();
+});
+document.addEventListener("keydown", e => {
+  if (!ui.tv) return;
+  if (e.key === "Escape" && !document.fullscreenElement) { tvClose(); }
+  else if ((e.key === " " || e.key === "Enter") && !e.target.closest("button,input,select,textarea")) { e.preventDefault(); tvRollAction(); }
+  else if (e.key === "ArrowLeft" || e.key === "ArrowRight") { const b = document.querySelector('#tv [data-act="' + (e.key === "ArrowLeft" ? "tvPrev" : "tvNext") + '"]'); if (b && !b.disabled) b.click(); }
+  else if (e.key === "f" || e.key === "F") { const b = document.querySelector('#tv [data-act="tvFull"]'); if (b) b.click(); }
+});
+
 /* ---------- actions ---------- */
 function mustEdit(){ if (readOnly()){ toast("Masuk sebagai bendahara untuk mengubah data"); return false; } return true; }
 function memberName(id){ const m = S.members.find(x => x.id === id); return m ? m.name : "Anggota"; }
@@ -696,10 +1007,13 @@ function roll(){
   const pool = cand.slice(), picks = [];
   for (let i = 0; i < n; i++) { const a = new Uint32Array(1); crypto.getRandomValues(a); picks.push(pool.splice(a[0] % pool.length, 1)[0]); }
   const reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const ms = ui.tv ? (reduce ? 1200 : 4200) : (reduce ? 300 : 2200);
+  if (channel && mode === "remote") channel.send({ type: "broadcast", event: "rolling", payload: { round: r, n, ms } });
   ui.rolling = true; ui.rollCount = n; ui.rollName = cand[0].name; render();
+  if (ui.tv) tvStartSpin(ms);
   let t = 0;
   const iv = setInterval(() => { const el = $("#rollName"); t++; if (el) el.textContent = cand[t % cand.length].name; }, 80);
-  setTimeout(() => { clearInterval(iv); ui.rolling = false; addWinners(r, picks.map(m => m.id)); toast("🎉 " + names(picks) + " dapat arisan!"); }, reduce ? 300 : 2200);
+  setTimeout(() => { clearInterval(iv); ui.rolling = false; addWinners(r, picks.map(m => m.id)); if (!ui.tv) toast("🎉 " + names(picks) + " dapat arisan!"); }, ms);
 }
 function reminderText(r){
   const unpaid = S.members.filter(m => !isPaid(r, m.id));
@@ -867,6 +1181,11 @@ app.addEventListener("click", e => {
     case "setCurrent": if (!mustEdit()) return; S.current = ui.round; commit("Putaran berjalan diubah ke " + (S.current+1)); break;
     case "remind": copy(reminderText(ui.round), "Pengingat tersalin, tempel di grup WA"); break;
     case "summary": copy(summaryText(ui.round), "Rekap tersalin"); break;
+    case "install": doInstall(); break;
+    case "tvOpen": tvOpen(); break;
+    case "ics": download(slug() + "-jadwal-kocokan.ics", icsText(), "text/calendar;charset=utf-8"); toast("File kalender diunduh. Buka file itu untuk menambahkan semua jadwal kocokan."); break;
+    case "restoreCancel": ui.restore = null; ui.armed = {}; render(); break;
+    case "restoreGo": if (!mustEdit() || !arm("restore")) return; runRestore(); break;
     case "remPrev": ui.remPrev = b.dataset.v; render(); break;
     case "repSort": ui.repSort = b.dataset.v; render(); break;
     case "repOpen": ui.repOpen = ui.repOpen === id ? null : id; render(); break;
@@ -898,7 +1217,7 @@ app.addEventListener("click", e => {
     case "importJson": {
       if (!mustEdit()) return;
       try {
-        const D = JSON.parse($("#importBox").value);
+        const D0 = JSON.parse($("#importBox").value), item = backupItem(D0), D = item ? item.data : D0;
         if (!D || !Array.isArray(D.members) || typeof D.payments !== "object") throw 0;
         S = blank(Object.assign({}, D, { sample: false })); ui.round = S.current; commit("Data diimpor"); toast("Data berhasil diimpor");
       } catch(err){ toast("Data tidak dikenali. Gunakan file atau teks dari Cadangan data."); }
@@ -924,6 +1243,13 @@ app.addEventListener("submit", async e => {
       location.search = "?g=" + res.id;
     } catch(err) { ui.busy = false; ui.createErr = err.message || "Gagal membuat arisan."; render(); }
     return;
+  }
+  if (f.id === "restorePassForm") {
+    const R = ui.restore; if (!R || !R.buf) return;
+    R.busy = true; R.err = ""; render();
+    try { const item = backupItem(JSON.parse(await decryptOpenSSL(R.buf, $("#restorePass").value))); if (!item) throw new Error("Isi file bukan backup Buku Arisan."); ui.restore = { fileName: R.fileName, item }; }
+    catch(err) { R.busy = false; R.err = err.message || "Gagal membuka file."; }
+    render(); return;
   }
   if (f.id === "loginForm") { const p = $("#pin").value; if (p) tryLogin(p, false); return; }
   if (f.id === "pinForm") {
@@ -957,9 +1283,11 @@ document.addEventListener("click", e => {
   if (e.target.id === "modal" || (b && b.dataset.act === "closeModal")) { ui.modal = null; renderModal(); }
   else if (b && b.dataset.act === "dlProof" && ui.modal.img) downloadUrl("bukti-transfer-" + slug() + "-p" + (ui.modal.r+1) + "-" + memberName(ui.modal.id).toLowerCase().replace(/[^a-z0-9]+/g, "-") + (ui.modal.img.startsWith("data:image/png") ? ".png" : ".jpg"), ui.modal.img);
 });
-document.addEventListener("keydown", e => { if (e.key === "Escape" && ui.modal) { ui.modal = null; renderModal(); } });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && ui.modal) { ui.modal = null; renderModal(); } if (e.key === "Escape") closeSheet(); });
+document.addEventListener("click", e => { const sh = document.getElementById("sheet"); if (sh && (e.target === sh || e.target.closest('#sheet [data-act="closeSheet"]'))) closeSheet(); });
 app.addEventListener("change", e => {
   const t = e.target;
+  if (t.id === "restoreFile" && t.files && t.files[0]) { loadRestoreFile(t.files[0]); t.value = ""; return; }
   if (t.classList.contains("proofFile") && t.files && t.files[0]) {
     if (!mustEdit()) return;
     const r = +t.dataset.r, id = t.dataset.id;

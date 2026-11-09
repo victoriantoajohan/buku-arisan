@@ -6,7 +6,13 @@
 <title>Buku Arisan</title>
 <meta name="description" content="Catat iuran arisan, checklist transfer, kocok pemenang, dan kirim pengingat WhatsApp.">
 <meta name="theme-color" content="#2C3BA8">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%232C3BA8'/%3E%3Ctext x='32' y='44' font-size='34' text-anchor='middle' font-family='Arial' font-weight='700' fill='white'%3EA%3C/text%3E%3C/svg%3E">
+<link rel="icon" type="image/png" href="icons/favicon-64.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Arisan">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap">
@@ -187,6 +193,60 @@ label.pill{display:inline-flex;align-items:center;gap:6px;border:1px solid var(-
 label.pill input{width:auto;accent-color:var(--accent);margin:0}
 label.pill:has(input:checked){background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
 pre.preview{margin:0;white-space:pre-wrap;word-break:break-word;font-family:var(--f-body);font-size:13.5px;line-height:1.5;background:#E7FFDB;color:#111B21;border-radius:12px;padding:12px 14px;max-height:420px;overflow:auto;border:1px solid var(--line)}
+/* layar kocok (TV) — sengaja satu tema gelap seperti panggung */
+.btn-tv{background:var(--ink);color:var(--bg);border-color:var(--ink);font-size:13px;padding:7px 12px}
+.btn-tv:hover{opacity:.9;border-color:var(--ink)}
+.tv{--tv-bg:#0B0E24;--tv-bg2:#1A2160;--tv-ink:#F4F2EA;--tv-mute:#A9AED6;--tv-gold:#F2B840;--tv-gold2:#FFE08A;--tv-line:rgba(255,255,255,.12);--tv-ok:#4FC48C;
+  position:fixed;inset:0;z-index:40;color:var(--tv-ink);background:radial-gradient(120% 90% at 50% 0%,var(--tv-bg2) 0%,var(--tv-bg) 62%);
+  display:grid;grid-template-rows:auto 1fr auto auto;gap:clamp(10px,2vh,24px);overflow:hidden;color-scheme:dark;
+  padding:max(clamp(14px,3vh,36px),env(safe-area-inset-top,0px)) max(clamp(16px,4vw,56px),env(safe-area-inset-right,0px)) max(clamp(14px,3vh,36px),env(safe-area-inset-bottom,0px)) max(clamp(16px,4vw,56px),env(safe-area-inset-left,0px))}
+.tv-confetti{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;z-index:2}
+.tv-top{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:12px;position:relative;z-index:3}
+.tv-head{min-width:0}
+.tv-eyebrow{font-size:clamp(11px,1.3vw,15px);letter-spacing:.14em;text-transform:uppercase;color:var(--tv-gold);font-weight:700}
+.tv-title{font-family:var(--f-display);font-weight:800;font-size:clamp(24px,4.2vw,58px);line-height:1.02;letter-spacing:-.02em;overflow-wrap:anywhere}
+.tv-sub{color:var(--tv-mute);font-size:clamp(13px,1.6vw,20px);margin-top:4px}
+.tv-ctl{display:flex;gap:6px;flex-wrap:wrap}
+.tv-ctl button{background:rgba(255,255,255,.08);color:var(--tv-ink);border:1px solid var(--tv-line);font-size:13px;padding:8px 12px}
+.tv-ctl button:hover{border-color:var(--tv-mute)}
+.tv-stage{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;gap:clamp(8px,1.6vh,18px);min-height:0;position:relative;z-index:3}
+.tv-label{font-size:clamp(14px,2vw,26px);letter-spacing:.12em;text-transform:uppercase;color:var(--tv-mute);font-weight:700}
+.tv-q{font-family:var(--f-display);font-weight:800;font-size:clamp(90px,22vh,240px);line-height:1;color:var(--tv-gold);text-shadow:0 0 60px rgba(242,184,64,.35)}
+.tv-spin{font-family:var(--f-display);font-weight:800;font-size:clamp(40px,9vw,140px);line-height:1.05;color:var(--tv-gold2);text-shadow:0 0 40px rgba(242,184,64,.45);max-width:100%;overflow-wrap:anywhere}
+.tv-note{color:var(--tv-mute);font-size:clamp(14px,1.8vw,22px)}
+.tv-winners{display:flex;flex-wrap:wrap;justify-content:center;gap:clamp(12px,2.4vw,36px);width:100%}
+.tv-win{background:linear-gradient(160deg,rgba(242,184,64,.22),rgba(242,184,64,.05));border:2px solid var(--tv-gold);border-radius:22px;padding:clamp(14px,2.4vh,30px) clamp(18px,3vw,44px);min-width:min(100%,280px);max-width:100%;display:flex;flex-direction:column;gap:6px;align-items:center}
+.tv-winners.n1 .tv-win{min-width:min(100%,420px)}
+.tv-win-name{font-family:var(--f-display);font-weight:800;font-size:clamp(34px,6.2vw,96px);line-height:1.02;overflow-wrap:anywhere}
+.tv-winners.n3 .tv-win-name,.tv-winners.n4 .tv-win-name,.tv-winners.n5 .tv-win-name{font-size:clamp(26px,4vw,60px)}
+.tv-win-amt{font-family:var(--f-mono);font-weight:600;color:var(--tv-gold);font-size:clamp(18px,2.6vw,36px)}
+.tv-win-tag{font-size:13px;font-weight:700;color:var(--tv-ok);text-transform:uppercase;letter-spacing:.08em}
+.tv-win.fresh{animation:tvPop .7s cubic-bezier(.2,1.4,.4,1) both;box-shadow:0 0 80px rgba(242,184,64,.35)}
+@keyframes tvPop{0%{transform:scale(.4);opacity:0}100%{transform:scale(1);opacity:1}}
+.tv-board{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;position:relative;z-index:3;max-height:24vh;overflow:hidden}
+.tv-chip{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;border:1px solid var(--tv-line);background:rgba(255,255,255,.05);font-size:clamp(12px,1.25vw,17px);font-weight:600;transition:background .08s,color .08s,transform .08s}
+.tv-chip i{font-style:normal;font-size:.78em;color:var(--tv-mute);font-family:var(--f-mono)}
+.tv-chip.done{opacity:.38}
+.tv-chip.now{background:var(--tv-gold);color:#1B1300;border-color:var(--tv-gold)} .tv-chip.now i{color:#5A4100}
+.tv-chip.hot{background:var(--tv-gold2);color:#1B1300;border-color:var(--tv-gold2);transform:scale(1.08)}
+.tv-foot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:14px 24px;position:relative;z-index:3}
+.tv-paid{flex:1 1 320px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.tv-paid-row{display:flex;flex-wrap:wrap;justify-content:space-between;gap:6px 16px;color:var(--tv-mute);font-size:clamp(13px,1.5vw,19px)}
+.tv-paid-row b{color:var(--tv-ink);font-family:var(--f-mono);font-weight:600}
+.tv-bar{height:10px;border-radius:999px;background:rgba(255,255,255,.1);overflow:hidden}
+.tv-bar i{display:block;height:100%;background:var(--tv-ok);border-radius:999px}
+.tv-roll{background:var(--tv-gold);color:#1B1300;border:none;border-radius:16px;padding:clamp(12px,2vh,20px) clamp(22px,3vw,40px);font-family:var(--f-display);font-weight:800;font-size:clamp(18px,2.2vw,30px);display:flex;flex-direction:column;align-items:center;gap:2px;box-shadow:0 10px 40px rgba(242,184,64,.3)}
+.tv-roll small{font-family:var(--f-body);font-weight:600;font-size:12px;opacity:.7}
+.tv-roll:hover{filter:brightness(1.06);border:none}
+.tv-wait{color:var(--tv-mute);font-size:clamp(13px,1.5vw,18px)}
+.tv button:focus-visible{outline:3px solid var(--tv-gold2);outline-offset:3px}
+@media (max-height:520px){.tv-board{display:none}}
+@media (prefers-reduced-motion: reduce){.tv-win.fresh{animation:none}.tv-chip{transition:none}}
+/* pulihkan backup, petunjuk pasang */
+.restore{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center}
+.restore-box{display:flex;flex-direction:column;gap:8px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--sunk)}
+.restore-box .login input{max-width:240px}
+ol.steps{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:8px;font-size:15px}
 /* laporan */
 .stats.cash{grid-template-columns:repeat(4,minmax(0,1fr))}
 @media (max-width:720px){.stats.cash{grid-template-columns:repeat(2,minmax(0,1fr))}}
@@ -211,6 +271,6 @@ tr.detail td{background:var(--sunk);white-space:normal;text-align:left;position:
 <body>
 <div id="app"></div>
 <script src="reminder-core.js?v=da13f034"></script>
-<script src="app.js?v=e5c26e4e"></script>
+<script src="app.js?v=77544f00"></script>
 </body>
 </html>
