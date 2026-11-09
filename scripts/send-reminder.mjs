@@ -47,7 +47,18 @@ const cfgJs = readFileSync(join(ROOT, "config.js"), "utf8");
 const SB_URL = env.SUPABASE_URL || (cfgJs.match(/https:\/\/[a-z0-9]+\.supabase\.co/) || [])[0];
 const SB_KEY = env.SUPABASE_ANON_KEY || (cfgJs.match(/eyJ[A-Za-z0-9._-]+/) || [])[0];
 if (!SB_URL || !SB_KEY) fail("config.js belum berisi URL dan anon key Supabase.");
-if (!/^[0-9a-f-]{36}$/i.test(env.ARISAN_ID || "")) fail("Secret ARISAN_ID belum diisi atau formatnya salah.");
+const SCHEDULED = env.GITHUB_EVENT_NAME === "schedule";
+// Run terjadwal yang belum disiapkan dilewati tanpa error, supaya GitHub tidak mengirim email gagal setiap hari.
+function notReady(msg) {
+  if (SCHEDULED) { out("⏭️ Dilewati: " + msg + " Pengingat otomatis belum disiapkan (lihat README bagian Pengingat WhatsApp otomatis)."); flush(); process.exit(0); }
+  fail(msg);
+}
+// Terima ID polos, link lengkap (…?g=<id>), atau ID dengan spasi/tanda kutip.
+const rawId = String(env.ARISAN_ID || "").trim();
+const ARISAN_ID = (rawId.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i) || [])[0];
+if (!rawId) notReady("Secret ARISAN_ID belum diisi.");
+if (!ARISAN_ID) fail("Secret ARISAN_ID formatnya salah (" + rawId.length + " karakter). Isi dengan ID dari link arisan, contoh: bfa72c39-d96d-477b-82ec-1156b8f3aa06");
+env.ARISAN_ID = ARISAN_ID;
 
 async function rpc(fn, args) {
   const res = await fetch(SB_URL + "/rest/v1/rpc/" + fn, {
@@ -109,6 +120,13 @@ const plan = core.build(res.data || {}, { today, url: link, hasQr: !!res.qr_hash
 out("Tanggal (WIB): " + today + " · putaran " + (plan.round + 1) + " · kocokan " + plan.dueText + " (" + plan.label + ")");
 out("Belum transfer: " + plan.unpaid.length + " orang · provider: " + provider + (DRY ? " · DRY RUN" : "") + (FORCE ? " · FORCE" : ""));
 if (!plan.shouldSend) { out("Tidak ada yang dikirim: " + plan.reason); flush(); process.exit(0); }
+
+// Pastikan gateway sudah diatur sebelum mencoba mengirim.
+const gatewayMissing = provider === "waha" ? (!env.WAHA_URL && "WAHA_URL")
+  : provider === "fonnte" ? (!env.FONNTE_TOKEN && "FONNTE_TOKEN")
+  : provider === "webhook" ? (!env.WA_WEBHOOK_URL && "WA_WEBHOOK_URL") : false;
+if (gatewayMissing && !DRY) notReady("Secret " + gatewayMissing + " untuk gateway " + provider + " belum diisi.");
+if (gatewayMissing && DRY) out("Catatan: secret " + gatewayMissing + " belum diisi; kiriman sungguhan akan gagal.");
 
 const sent = { group: 0, personal: 0, treasurer: 0 }, errors = [];
 async function attempt(label, fn) {
